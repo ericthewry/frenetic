@@ -1,8 +1,9 @@
 open Syntax
 open Core
-
+       
 module FDD : module type of Local_compiler.FDD
-
+module Interp : module type of Local_compiler.Interp
+                              
 (** Intermediate representation of global compiler: NetKAT Automata *)
 module Automaton : sig
   type t
@@ -22,11 +23,15 @@ module Automaton : sig
   (** Compiles the provided automaton `t` using `graphviz`, and opens the resulting
       file. *)
 
+  open Semantics                                                         
+  val fdd_trace_interp : policy -> packet -> (packet * (FDD.t list)) list
+  val cannibalize_packet : packet -> int64 list -> packet
+  val packet_tfx : policy -> policy -> packet -> (packet * switchId * packet) option
+                         
   val skip_topo_states : t
     -> ((int64, (int64 * int64)) Hashtbl.t * ((int64 * int64), Int64.Set.t) Hashtbl.t)
 end
-
-
+                     
 val compile : ?options:Local_compiler.compiler_options
            -> ?pc:Fdd.Field.t
            -> ?ing:pred

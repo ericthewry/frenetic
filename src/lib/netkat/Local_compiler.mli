@@ -28,6 +28,12 @@ module FDD : sig
   val big_union : t list -> t
 end
 
+module Interp : sig
+  val eval_to_action : packet -> FDD.t -> Action.t
+  val eval : packet -> FDD.t -> PacketSet.t
+  val eval_pipes : packet -> FDD.t -> (string * packet) list * (string * packet) list * packet list
+end                        
+
 type t = FDD.t
 (** The type of the intermediate compiler representation (FDD). *)
 

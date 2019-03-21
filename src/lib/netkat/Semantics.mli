@@ -30,6 +30,23 @@ module HeadersValues : sig
     ; tcpDstPort : tpPort
     } [@@deriving sexp, fields]
 
+  val make: ?location:location
+            -> ?from:abstract_location
+            -> ?abstractLoc:abstract_location
+            -> ?ethSrc:int64 
+            -> ?ethDst:int64 
+            -> ?vlan:int16
+            -> ?vlanPcp:dlVlanPcp
+            -> ?vswitch:int64
+            -> ?vport:int64
+            -> ?ethType:dlTyp
+            -> ?ipProto:nwProto
+            -> ?ipSrc:int32
+            -> ?ipDst:int32
+            -> ?tcpSrcPort:tpPort
+            -> ?tcpDstPort:tpPort
+            -> t
+
   val compare : t -> t -> int
   val to_string : t -> string
   val to_hvs : t -> header_val list

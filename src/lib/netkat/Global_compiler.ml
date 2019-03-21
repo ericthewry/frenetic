@@ -2,9 +2,11 @@ open Core
 open Fdd
 open Syntax
 open Frenetic_kernel
-
+open Semantics
+       
 exception Non_local = Syntax.Non_local
 module FDD = Local_compiler.FDD
+module Interp = Local_compiler.Interp
 module Par = Action.Par
 module Seq = Action.Seq
 (*==========================================================================*)
@@ -125,7 +127,7 @@ module Automaton = struct
       mutable source : int64;
       mutable nextState : int64 }
 
-  (* lazy intermediate presentation to avoid compiling uncreachable automata states *)
+  (* lazy intermediate presentation to avoid compiling unreachable automata states *)
   type t0 =
     { states : (FDD.t * FDD.t) Lazy.t Tbl.t;
       source : int64;
@@ -655,16 +657,178 @@ module Automaton = struct
       do_states ();
       fprintf fmt "}@.";
       Buffer.contents buf
-    end
+      end
 
+  let fdd_trace_interp policy packet : (packet * (FDD.t list)) list =
+    (* Compute an automaton for the input policy *)
+    let auto = of_policy policy in
+    (*collect all FDD traces that the packet [packet] can take through the program*)
+    
+    fold_reachable auto
+      ~order:`Pre
+      ~init:[(packet, []) ]
+      ~f:(fun paths stateIdx (e,d) ->
+        List.fold paths ~init:paths ~f:(fun paths' (pkt, path) ->
+            (* run each packet through e *)
+            (* make sure that we're not in a contradictory state *)
+            (* Printf.printf "\nstate: %Li\n" stateIdx;
+             * Printf.printf "E: %s\n" (FDD.to_string e);
+             * Printf.printf "D: %s\n" (FDD.to_string d); *)
+            let e_pkts = if e = FDD.drop then
+                           (Printf.printf "\t E is drop \n";
+                            PacketSet.singleton packet)
+                         else
+                           Interp.eval pkt e
+            in
+            (* Run each resulting packet through d *)
+            let ed_pkts = PacketSet.fold (PacketSet.singleton pkt) ~init:(PacketSet.empty)
+                            ~f:(fun out_pkts e_pkt ->
+                              (* Printf.printf "\tDoing ED thing\n"; *)
+                              PacketSet.union out_pkts (Interp.eval e_pkt d)
+                            )
+            in
+            
+            (* create new Paths by appending e and the carried packet*)
+            let e_paths = PacketSet.fold e_pkts ~init:[]
+                            ~f:(fun traces out_pkt ->
+                              (out_pkt, List.append path [e]) :: traces
+                            )
+            in
+            PacketSet.fold ed_pkts ~init:[] ~f:(fun traces out_pkt ->
+                (out_pkt, List.append path [e;d]) :: traces)
+            |> List.append e_paths
+          )
+      )
+
+  (* Assume switches have no more than 64 ports, i.e. 6 bits for port id
+   * only cannibalize the ethDst address for now *)
+  let cannibalize_packet pkt trace : packet =
+    let ethDst,_ = List.fold trace ~init:(Int64.zero, 7) (* new ethDst and counter*)
+                     ~f:(fun (stack, counter) ident ->
+                       if counter < 0 then failwith "Cannot support traces longer than 8 hops" else
+                         let trunced = Int64.(land) ident 63L in
+                         let shifted = Int64.shift_left trunced counter in
+                         (Int64.(lor) stack shifted, counter - 1)
+                     ) in
+    {pkt with headers = {pkt.headers with ethDst = ethDst}}
+
+
+  let flow_from_packet ~flow:match_pkt ~action:act_pkt ~port:next_hop : OpenFlow.flow =
+    let open OpenFlow in
+    let match_hvs = match_pkt.headers in
+    let match_pat : Pattern.t =  {
+        dlSrc     = Some match_hvs.ethSrc;
+        dlDst     = Some match_hvs.ethDst;
+        dlTyp     = Some match_hvs.ethType;
+        dlVlan    = Some match_hvs.vlan;
+        dlVlanPcp = Some match_hvs.vlanPcp;
+        nwSrc     = Some (match_hvs.ipSrc, 32l);
+        nwDst     = Some (match_hvs.ipDst, 32l);
+        nwProto   = Some match_hvs.ipProto;
+        tpSrc     = Some match_hvs.tcpSrcPort;
+        tpDst     = Some match_hvs.tcpDstPort;
+        inPort    = match match_hvs.location with
+                    | Physical port -> Some port
+                    | _ -> None
+                            
+      } in
+    let act_hvs = act_pkt.headers in
+    let act = [[[SetEthSrc act_hvs.ethSrc         |> Modify;
+                 SetEthDst act_hvs.ethDst         |> Modify;
+                 SetVlan (Some act_hvs.vlan)      |> Modify; (* EC: Why Does this expect an option type? *)
+                 SetVlanPcp act_hvs.vlan          |> Modify;
+                 SetEthTyp act_hvs.ethType        |> Modify;
+                 SetIPProto act_hvs.ipProto       |> Modify;
+                 SetIP4Src act_hvs.ipSrc          |> Modify;
+                 SetIP4Dst act_hvs.ipDst          |> Modify;
+                 SetTCPSrcPort act_hvs.tcpSrcPort |> Modify;       
+                 SetTCPDstPort act_hvs.tcpDstPort |> Modify;
+                 Physical next_hop |> Output
+              ]]] in
+
+    {pattern      = match_pat;
+     action       = act ;
+     cookie       = 0L;
+     idle_timeout = Permanent;
+     hard_timeout = Permanent;
+    }
+
+      
+  (*
+   * Input is going to be 
+   *  -- a policy (as netkat programs)
+   *  -- the topology (as a netkat program) 
+   *  -- the input packet 
+   * Output needs to be
+   *  -- the ingress switchID
+   *  -- the OpenFlow rules to create special purpose packet
+   *  -- the identifier of the end switch
+   *  -- the OpenFlow rules to reinstate the special packet on the end switch
+   *)
+  let packet_tfx (policy:Syntax.policy) (topo:Syntax.policy) (pkt:packet) : ((switchId * OpenFlow.flow) * (switchId * OpenFlow.flow)) option =
+    let open Option in
+    let fdd_trace =
+      pkt
+      |> (Syntax.(Star(Seq(policy, topo)))
+          |> fdd_trace_interp)
+    in
+    match fdd_trace with
+    | [] -> None (*packet is dropped*)
+    | (out_pkt, trace)::[] ->
+       let port_stack = List.fold trace ~init:[]
+                          ~f:(fun acc fdd ->
+                            FDD.get_port_trace pkt fdd |> List.append acc) in
+       (match port_stack with 
+        | [] -> None
+        | first_hop :: port_stack' ->
+           let src_route_packet = cannibalize_packet out_pkt port_stack' in
+           let traversed_packet = {src_route_packet
+                                  with headers = {src_route_packet.headers
+                                                 with ethDst = 0L}} in
+
+           
+           (* [pkt] enters network at switch [pkt.switch], gets converted into [src_route_packet] on [pkt.switch]
+            * then [src_route_packet] traverses the network (to [out_pkt.switch]),  consuming the [ethDst] field along the way.
+            * then, [out_pkt.switch] converts the packet to [out_pkt], which is the packet that would've been output by the untransformed network
+            *)
+
+           (*Bind is in Option monad*)
+           Int64.to_int32 first_hop
+           >>= fun first_hop_port -> (
+
+             let ingress_tfx = flow_from_packet ~flow:pkt
+                                 ~action:src_route_packet
+                                 ~port:first_hop_port in
+             
+             (*Bind is in Option*)
+             List.last port_stack'
+             >>= Int64.to_int32
+             >>= fun egress_port -> (
+           
+               let egress_tfx = flow_from_packet ~flow:traversed_packet
+                                  ~action:out_pkt
+                                  ~port:egress_port in
+               
+               Some ((pkt.switch, ingress_tfx ),
+                     (out_pkt.switch, egress_tfx))
+             )
+           )
+       )
+    | _::_ -> failwith "multicast is unsupported"
+                       
+      
   let render ?(format="pdf") ?(title="FDD") t =
     Frenetic_kernel.Util.show_dot ~format ~title (to_dot t)
 
 end
-(* END: module Automaton *)
-
+(* END: module Automaton *)                
+    
 open Local_compiler
 let compile ?(options=default_compiler_options) ?(pc=Field.Vlan) ?ing pol : FDD.t =
   prepare_compilation ~options pol;
   Automaton.of_policy pol
   |> Automaton.to_local ~pc
+
+
+  
+  

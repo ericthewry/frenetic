@@ -24,6 +24,38 @@ module HeadersValues = struct
     ; tcpDstPort : tpPort
     } [@@deriving sexp, fields, compare]
 
+  let make ?(location=Syntax.Physical Int32.zero)
+        ?(from = "")
+        ?(abstractLoc = "")
+        ?(ethSrc = Int64.zero)
+        ?(ethDst = Int64.zero)
+        ?(vlan = 0)
+        ?(vlanPcp = 0)
+        ?(vswitch = Int64.zero)
+        ?(vport = Int64.zero)
+        ?(ethType = 0)
+        ?(ipProto = 0)
+        ?(ipSrc = Int32.zero)
+        ?(ipDst = Int32.zero)
+        ?(tcpSrcPort = 0)
+        ?(tcpDstPort = 0) : t =
+    { location = location;
+      from = from ;
+      abstractLoc = abstractLoc;
+      ethSrc = ethSrc;
+      ethDst = ethDst;
+      vlan = vlan;
+      vlanPcp = vlanPcp;
+      vswitch = vswitch;
+      vport = vport;
+      ethType = ethType;
+      ipProto = ipProto;
+      ipSrc = ipSrc;
+      ipDst = ipDst;
+      tcpSrcPort = tcpSrcPort;
+      tcpDstPort = tcpDstPort
+    }
+      
   let to_string (x:t) : string =
     let g to_string acc f =
       Printf.sprintf "%s%s=%s"
@@ -71,8 +103,8 @@ module HeadersValues = struct
       ~ipSrc:(conv (fun x -> IP4Src(x, 32l)))
       ~ipDst:(conv (fun x -> IP4Dst(x, 32l)))
       ~tcpSrcPort:(conv (fun x -> TCPSrcPort x))
-      ~tcpDstPort:(conv (fun x -> TCPDstPort x))
-
+      ~tcpDstPort:(conv (fun x -> TCPDstPort x))     
+      
 end
 
 type packet = {

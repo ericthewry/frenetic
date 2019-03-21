@@ -18,7 +18,7 @@
 *)
 
 open Core
-
+open Semantics
 module Field : sig
 
   (** Fields are analogous to binary variables in a BDD.
@@ -273,5 +273,7 @@ module FDD : sig
   val mk_cont : int64 -> t
   val conts : t -> Int64.Set.t
   val map_conts : t -> f:(int64 -> int64) -> t
+  val to_vals : packet -> v list
+  val get_port_trace : packet -> t -> int64 list
   val equivalent : t -> t -> bool
 end

@@ -1,6 +1,7 @@
 open Core
 
 module SDN = Frenetic_kernel.OpenFlow
+open Semantics
 
 
 module Field = struct
@@ -733,7 +734,7 @@ module FDD = struct
     (Field)
     (Value)
     (Action)
-
+    
   let mk_cont k = const Action.(Par.singleton (Seq.singleton K (Value.of_int64 k)))
 
   let conts fdd =
@@ -753,6 +754,47 @@ module FDD = struct
     in
     map_r f fdd
 
+  let to_vals (pkt : packet) : v list =
+    let hvs = pkt.headers in
+    [(Field.Switch, pkt.switch |> Const );
+     (Location, match hvs.location with
+                |  Physical loc -> Int32.to_int64 loc |> Const
+                | _ -> failwith "unrecognized location type");
+     (From, AbstractLocation hvs.from);
+     (AbstractLoc, AbstractLocation hvs.abstractLoc);
+     (EthSrc, hvs.ethSrc |> Const );
+     (EthDst, hvs.ethDst |> Const );
+     (EthType, Int.to_int64 hvs.ethType |> Const);
+     (Vlan, Int.to_int64 hvs.vlan |> Const);
+     (VlanPcp, Int.to_int64 hvs.vlanPcp |> Const );
+     (VSwitch, hvs.vswitch |> Const );
+     (VPort, hvs.vport  |> Const );
+     (IPProto, Int.to_int64 hvs.ipProto |> Const );
+     (IP4Src, Int32.to_int64 hvs.ipSrc |> Const );
+     (IP4Dst, Int32.to_int64 hvs.ipDst |> Const );
+     (TCPSrcPort, Int.to_int64 hvs.tcpSrcPort |> Const );
+     (TCPDstPort, Int.to_int64 hvs.tcpDstPort |> Const )
+    ]
+      
+          
+  let get_port_trace packet fdd =
+    let rstr_fdd = restrict (to_vals packet) fdd in
+    fold rstr_fdd
+      ~f:(fun action ->
+        Action.fold_fv action ~init:[] ~f:(fun locs ~field ~value ->
+            match field, value with
+            | Location, Const port -> List.cons port locs
+            | _ -> []
+          )
+      )
+      (* because rstr_fdd was restricted by a (complete) packet, 
+       * either acc_true or acc_false will be [] *)
+      ~g:(fun _ acc_true acc_false  ->
+          match acc_true, acc_false with
+          | [], _ -> acc_false
+          | _, [] -> acc_true
+          | _, _ -> failwith "Malformed FDD had non-empty action set on two branches"
+      )
 
   let equivalent t1 t2 =
     (* A context represents the set of packets that can reach a certain node.
@@ -801,4 +843,6 @@ module FDD = struct
     in
     do_nodes t1 t2 Ctxt.empty
 
+    
+             
 end
