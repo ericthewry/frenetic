@@ -1,6 +1,8 @@
 open Syntax
 open Core
        
+module OpenFlow : module type of Frenetic_kernel.OpenFlow
+module Util : module type of Frenetic_kernel.Util
 module FDD : module type of Local_compiler.FDD
 module Interp : module type of Local_compiler.Interp
                               
@@ -24,9 +26,16 @@ module Automaton : sig
       file. *)
 
   open Semantics                                                         
-  val fdd_trace_interp : policy -> packet -> (packet * (FDD.t list)) list
+  val fdd_trace_interp : policy -> packet -> (packet * (Syntax.location list)) list
   val cannibalize_packet : packet -> int64 list -> packet
-  val packet_tfx : policy -> policy -> packet -> (packet * switchId * packet) option
+  val flow_from_packet : flow:packet -> action:packet -> outport:OpenFlow.portId ->
+                         match_inport:bool -> minimize:bool  -> OpenFlow.flow
+  val packet_tfx : policy -> packet -> ((switchId * OpenFlow.flow) * (switchId * OpenFlow.flow)) option
+
+  val get_all_paths : policy -> ((((bool * (Fdd.Field.t * Fdd.Value.t)) list) option)
+                                 * (int64 list)
+                                 * (Fdd.Field.t * Fdd.Value.t) list
+                                ) list
                          
   val skip_topo_states : t
     -> ((int64, (int64 * int64)) Hashtbl.t * ((int64 * int64), Int64.Set.t) Hashtbl.t)

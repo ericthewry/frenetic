@@ -1,12 +1,13 @@
 open Core
 open Fdd
 open Syntax
-open Frenetic_kernel
 open Semantics
        
 exception Non_local = Syntax.Non_local
 module FDD = Local_compiler.FDD
 module Interp = Local_compiler.Interp
+module OpenFlow = Frenetic_kernel.OpenFlow
+module Util = Frenetic_kernel.Util
 module Par = Action.Par
 module Seq = Action.Seq
 (*==========================================================================*)
@@ -26,6 +27,7 @@ module Pol = struct
     | Star of t
     | Dup (** we can handle all of NetKAT *)
     | FDD of FDD.t * FDD.t (** FDD injection. E and D matrix. *)
+
 
   let drop = Filter False
   let id = Filter True
@@ -86,6 +88,7 @@ module Pol = struct
           Optimize.(mk_and (Test (Switch s2)) (mk_not ing))
           |> mk_filter in
       mk_big_seq [filter_loc s1 p1; Dup; link; Dup; post_link]
+    (*ingress Dup is commented out for EdgeOF*)
     | VLink (s1,p1,s2,p2) ->
       let link = mk_seq (mk_mod (VSwitch s2)) (mk_mod (VPort p2)) in
       let post_link = match ing with
@@ -659,61 +662,414 @@ module Automaton = struct
       Buffer.contents buf
       end
 
-  let fdd_trace_interp policy packet : (packet * (FDD.t list)) list =
+         
+  let render ?(format="pdf") ?(title="FDD") t =
+    Frenetic_kernel.Util.show_dot ~format ~title (to_dot t)
+
+  let fdd_trace_interp policy packet : (packet * (Syntax.location list)) list =
     (* Compute an automaton for the input policy *)
-    let auto = of_policy policy in
-    (*collect all FDD traces that the packet [packet] can take through the program*)
+    let auto = of_policy ~dedup:true ~cheap_minimize:true policy in
+    let rec interp is_phys (pkt, seen) (id : int64) : (packet * (Syntax.location list)) list =
+      (* Printf.printf "\nSTATE: %s " (Int64.to_string id);
+       * Printf.printf "Packet: Vlan %s EthSrc %s EthDst %s IPDst %s Port %s Switch %s\n" (Int.to_string pkt.headers.vlan) (Int64.to_string pkt.headers.ethSrc) (Int64.to_string pkt.headers.ethDst) (Int32.to_string pkt.headers.ipDst) (Int32.to_string ((fun (Physical port) -> port) pkt.headers.location)) (Int64.to_string pkt.switch); *)
+
+      let seen' = S.add seen id in
+      let (e,d) as state = Tbl.find_exn auto.states id in
+      (* Printf.printf "E: %s\n" (FDD.to_string e); *)
+      let epkts = Interp.eval pkt e in
+      let dpkts =
+        (* Printf.printf "D: %s\n" (FDD.to_string d); *)
+        let restr_d = FDD.restrict (List.map(to_hvs pkt) ~f:Pattern.of_hv) d in
+        PacketSet.fold (Interp.eval pkt restr_d) ~init:[] ~f:(fun acc dpkt ->
+            let next_hops = FDD.conts restr_d in
+            (* If there are no next hops then we're at the end of the trace *)
+            if Int64.Set.is_empty next_hops then
+              (* let () = Printf.printf "NO HOPS" in *)
+              [(dpkt, [])]
+            else
+              Int64.Set.fold next_hops ~init:[] ~f:(fun acc next_hop ->
+                  (* Printf.printf "K: %s\n" (Int64.to_string next_hop); *)
+                  List.fold (interp (not is_phys) (dpkt, seen') next_hop) ~init:[]
+                    ~f:(fun acc (final_packet, trace) ->
+                      (* Printf.printf "TRACE : ";
+                       * List.iter trace ~f:(fun (Physical p) -> Printf.printf " %s" (Int32.to_string p));
+                       * Printf.printf "\n"; *)
+                      let trace' = if is_phys then trace else dpkt.headers.location :: trace in
+                      (final_packet, trace') :: acc
+                    ) |> List.append acc
+                ) |> List.append acc
+          ) in
+      PacketSet.fold epkts ~init:dpkts ~f:(fun acc epkt -> (epkt, []) :: acc)
+    in
+    interp false (packet, S.empty) auto.source
+
+  type elt =
+    | TrTest of bool * FDD.v
+    | TrMod of FDD.v
+
+  let getmod (e:elt) : (Field.t * Value.t) option =
+    match e with
+    | TrTest _ -> None
+    | TrMod hv -> Some hv
+
+  let string_of_elt (e:elt) : string =
+    match e with
+    | TrTest (b, (Switch, Const v)) -> (if b then "" else "NEG ") ^
+                                         "Switch = " ^ Int64.to_string v
+    | TrTest (b, (Location, Const v)) -> (if b then "" else "NEG ") ^
+                                           "Location = " ^ Int64.to_string v
+    | TrTest (b, (EthDst, Const v)) -> (if b then "" else "NEG ") ^
+                                         "EthDst = " ^ Int64.to_string v
+    | TrMod (Switch, Const v) -> "Switch := " ^ Int64.to_string v
+    | TrMod (Location, Const v) -> "Location := " ^ Int64.to_string v
+    | TrMod (EthDst, Const v) ->"EthDst := " ^ Int64.to_string v
+    | _ -> failwith "Unsupported header"
+
+  let mk_trmods action : elt list = List.map (Action.Par.to_hvs action) ~f:(fun hv -> TrMod hv)
+
+  let mk_trtest b fv : elt =  TrTest (b, fv)
+
+  let uncurry f (x,y) = f x y
+                   
+              
+  (*Expand a single path into all paths through the automaton*)
+  let rec expand_one_path (path: (int64 * FDD.t) list) : elt list list= 
+    match path with
+    | [] -> []
+    | [(_,fdd)] ->
+       List.map (FDD.paths fdd)
+         ~f:(fun (test_list, action) ->
+           List.fold test_list ~init:[]
+             ~f:(fun acc (b, test) -> acc @ [mk_trtest b test] )
+           @ mk_trmods action
+         )
+    | ((_,fdd)::(nextid,fdd')::fdds) ->
+       List.fold (FDD.paths fdd) ~init:[]
+         ~f:(fun accum (path, action) ->
+           let trace = List.map path ~f:(fun (b, hv) -> mk_trtest b hv) @ mk_trmods action in
+           
+           match FDD.act_cont action with
+           | None ->
+              Printf.printf "CONTINUATION\n";
+              trace :: accum
+           | Some id -> (*if id = nextid then*)
+              let () = Printf.printf "CONTINUATION\n" in
+              let rec_paths = expand_one_path( (nextid, fdd') :: fdds )  in
+                            (List.map ~f:(fun p -> trace @ p) rec_paths) @ accum
+                         (*else accum*)
+         )
+      
+  let eliminate head valu (cond: (bool * (Field.t * Value.t)) list) =
+    let open Option in
+    let optcons x l = Some (List.cons x l) in
+    List.fold cond ~init:(Some []) ~f:(fun acc (b, (h,v)) ->
+        if h <> head (*Skip irrelevant headers*)
+        then acc >>= optcons (b, (h,v))
+        else (*header is the same*)
+          if b = (v = valu) then
+            (* let () = Printf.printf "%s = %s elim\n" (Field.to_string h) (Value.to_string v) in *)
+            acc (*Eliminate tautological conditions*)
+          else None (*Trace is a contradiction *)
+      )
+      
+  (*Expand paths through automaton to paths through FDDS*)
+  let expand_paths paths : elt list list =
+    let paths = List.fold paths ~init:[]
+                  ~f:(fun acc p ->
+                    Printf.printf "pathlength :: %d\n" (List.length p);
+                    expand_one_path p @ acc)
+    in
+    Printf.printf "Expanded Paths: \n[\n";
+    List.iter paths ~f:(fun path ->
+        Printf.printf "\t[ ";
+        List.iter path ~f:(fun e ->
+            Printf.printf "%s," (string_of_elt e);
+          );
+        Printf.printf "],\n"
+      );
+    Printf.printf "]\n";
+    paths
+
+  (* Assume [prec] is sat *)
+  let simplify_precondition prec : (bool * (Field.t * Value.t)) list = prec
+    (* let (truths, falses) = List.partition_tf ~f:fst prec in
+     * let member_of_truths f = List.fold truths ~init:false
+     *                            ~f:(fun acc (b, (h,v)) ->
+     *                              if h = f then true else acc ) in
+     * let falses' = List.filter falses ~f:(fun (_, (h, _)) ->  member_of_truths h ) in
+     * truths @ falses' *)
+
+  (* a path is a list of tagged predicates and actions
+   * predicate is a weakest precondition (expressed as a list of matches) to complete that path
+   * trace is the list of port-assignments in that path
+   * final packet is the result of running a packet matching the weakest precondition through the path
+   *)
+  let predicate_for_path (path : elt list) : ((bool * (Field.t * Value.t)) list) option =
+    let open Option in 
+    let rec loop rev_path cond =
+      match rev_path with
+      | [] -> Some cond
+      | pred :: rev_path' ->
+         match pred with
+         | TrTest (b, tst) -> loop rev_path' ((b, tst) :: cond)
+         | TrMod (header, value) ->
+            match eliminate header value cond with
+            | None -> None
+            | Some cond' -> loop rev_path' cond'
+    in
+    loop (List.rev path) []
     
-    fold_reachable auto
-      ~order:`Pre
-      ~init:[(packet, []) ]
-      ~f:(fun paths stateIdx (e,d) ->
-        List.fold paths ~init:paths ~f:(fun paths' (pkt, path) ->
-            (* run each packet through e *)
-            (* make sure that we're not in a contradictory state *)
-            (* Printf.printf "\nstate: %Li\n" stateIdx;
-             * Printf.printf "E: %s\n" (FDD.to_string e);
-             * Printf.printf "D: %s\n" (FDD.to_string d); *)
-            let e_pkts = if e = FDD.drop then
-                           (Printf.printf "\t E is drop \n";
-                            PacketSet.singleton packet)
-                         else
-                           Interp.eval pkt e
-            in
-            (* Run each resulting packet through d *)
-            let ed_pkts = PacketSet.fold (PacketSet.singleton pkt) ~init:(PacketSet.empty)
-                            ~f:(fun out_pkts e_pkt ->
-                              (* Printf.printf "\tDoing ED thing\n"; *)
-                              PacketSet.union out_pkts (Interp.eval e_pkt d)
-                            )
-            in
-            
-            (* create new Paths by appending e and the carried packet*)
-            let e_paths = PacketSet.fold e_pkts ~init:[]
-                            ~f:(fun traces out_pkt ->
-                              (out_pkt, List.append path [e]) :: traces
-                            )
-            in
-            PacketSet.fold ed_pkts ~init:[] ~f:(fun traces out_pkt ->
-                (out_pkt, List.append path [e;d]) :: traces)
-            |> List.append e_paths
-          )
+  let trace_for_path (path : elt list) : int64 list =
+    List.fold path ~init:[] ~f:(fun accum tr ->
+        match tr with
+        | TrMod (Location, Const v) -> v :: accum
+        | _  -> accum
+      )
+      
+  (*PRE:: each header only appears once in precond *)
+  let packet_satisfying (precond : (bool * (Field.t * Value.t)) list) =
+    let precond_true = List.filter precond ~f:fst in
+    let packet_sat_true = List.fold precond_true ~init:(make_packet ()) ~f:(fun pkt (b,(h,v)) ->
+                              match v with
+                              | Const res -> 
+                                 (match h with
+                                  | Field.Switch -> {pkt with switch = res }
+                                  | Field.Location -> {pkt with headers = {pkt.headers with location = Physical (Int32.of_int64_exn res)}}
+                                  | Field.Vlan -> {pkt with headers = {pkt.headers with vlan = Int.of_int64_exn res }}
+                                  | Field.VlanPcp -> {pkt with headers = {pkt.headers with vlanPcp = Int.of_int64_exn res }}
+                                  | Field.EthType -> {pkt with headers = {pkt.headers with ethType = Int.of_int64_exn res }}
+                                  | Field.IPProto -> {pkt with headers = {pkt.headers with ipProto = Int.of_int64_exn res }}
+                                  | Field.EthSrc -> {pkt with headers = {pkt.headers with ethSrc = res }}
+                                  | Field.EthDst -> {pkt with headers = {pkt.headers with ethDst = res}}
+                                  | Field.IP4Src -> {pkt with headers = {pkt.headers with ipSrc = Int32.of_int64_exn res }}
+                                  | Field.IP4Dst -> {pkt with headers = {pkt.headers with ipDst = Int32.of_int64_exn res }}
+                                  | Field.TCPSrcPort -> {pkt with headers = {pkt.headers with tcpSrcPort = Int.of_int64_exn res}}
+                                  | Field.TCPDstPort -> {pkt with headers = {pkt.headers with tcpDstPort = Int.of_int64_exn res}}
+                                  | _ -> failwith "Unsupported header field")
+                              | _ -> failwith "unsupported value type"
+                            ) in
+    let precond_false = List.filter precond ~f:(fun p -> not (fst p)) in
+    let packet_unsat_false = List.fold precond_false ~init:packet_sat_true ~f:(fun pkt (b, (h, v)) ->
+                                 match v with
+                                 | Const res ->
+                                    (match h with
+                                     | Field.Switch -> if pkt.switch = res
+                                                       then {pkt with switch = Int64.(+) res 1L}
+                                                       else pkt
+                                     | Field.Location -> if pkt.headers.location = Physical (Int32.of_int64_exn res)
+                                                         then {pkt with headers = {
+                                                                  pkt.headers with
+                                                                  location = Physical (Int32.(+) 1l (Int32.of_int64_exn res))}}
+                                                         else pkt
+                                     | Field.Vlan -> if pkt.headers.vlan = Int.of_int64_exn res
+                                                     then {pkt with headers = {
+                                                              pkt.headers with
+                                                              vlan = Int.of_int64_exn res
+                                                            }
+                                                          }
+                                                     else pkt
+                                     | Field.VlanPcp -> if pkt.headers.vlanPcp = Int.of_int64_exn res
+                                                        then {pkt with headers = {
+                                                                 pkt.headers with
+                                                                 vlanPcp = Int.of_int64_exn res
+                                                               }
+                                                             }
+                                                        else pkt
+                                     | Field.EthType -> if pkt.headers.ethType = Int.of_int64_exn res
+                                                        then {pkt with headers = {
+                                                                 pkt.headers with
+                                                                 ethType = Int.of_int64_exn res
+                                                               }
+                                                             }
+                                                        else pkt
+                                     | Field.IPProto -> if pkt.headers.ipProto = Int.of_int64_exn res
+                                                        then {pkt with headers = {
+                                                                 pkt.headers with
+                                                                 ipProto = Int.of_int64_exn res
+                                                               }
+                                                             }
+                                                        else pkt
+                                     | Field.EthSrc -> if pkt.headers.ethSrc = res
+                                                       then {pkt with headers = {
+                                                                pkt.headers with
+                                                                ethSrc = res
+                                                              }
+                                                            }
+                                                       else pkt
+                                     | Field.EthDst -> if pkt.headers.ethDst = res
+                                                       then {pkt with headers = {
+                                                                pkt.headers with
+                                                                ethDst= res
+                                                              }
+                                                            }
+                                                       else pkt
+                                     | Field.IP4Src -> if pkt.headers.ipSrc = Int32.of_int64_exn res
+                                                       then {pkt with headers = {
+                                                                pkt.headers with
+                                                                ipSrc = Int32.of_int64_exn res
+                                                              }
+                                                            }
+                                                       else pkt
+                                     | Field.IP4Dst -> if pkt.headers.ipDst = Int32.of_int64_exn res
+                                                       then {pkt with headers = {
+                                                                pkt.headers with
+                                                                ipDst = Int32.of_int64_exn res
+                                                              }
+                                                            }
+                                                       else pkt
+                                     | Field.TCPSrcPort -> if pkt.headers.tcpSrcPort = Int.of_int64_exn res
+                                                           then {pkt with headers = {
+                                                                    pkt.headers with
+                                                                    tcpSrcPort = Int.of_int64_exn res
+                                                                  }
+                                                                }
+                                                           else pkt
+                                     | Field.TCPDstPort -> if pkt.headers.tcpDstPort = Int.of_int64_exn res
+                                                           then {pkt with headers = {
+                                                                    pkt.headers with
+                                                                    tcpDstPort = Int.of_int64_exn res
+                                                                  }
+                                                                }
+                                                           else pkt
+                                     | _ -> failwith "unsupported field type"
+                                                     
+                                    )
+                                 | _ -> failwith "unsupported value type"
+                               ) in
+    packet_unsat_false
+
+
+  let to_syntax ((header, value) : (Field.t * Value.t)) : Syntax.header_val =
+    match value with
+    | Const v -> 
+       (match header with
+        | Field.Switch -> Syntax.Switch v
+        | Field.Location -> Syntax.Location (Physical (Int32.of_int64_exn v))
+        | Field.EthSrc -> Syntax.EthSrc v
+        | Field.EthDst -> Syntax.EthDst v
+        | Field.Vlan -> Syntax.Vlan (Int.of_int64_exn v)
+        | Field.VlanPcp -> Syntax.VlanPcp (Int.of_int64_exn v)
+        | Field.EthType -> Syntax.EthType (Int.of_int64_exn v)
+        | Field.IPProto -> Syntax.IPProto (Int.of_int64_exn v)
+        | Field.IP4Src -> Syntax.IP4Src (Int32.of_int64_exn v, 32l) (* Exact Matches Only *)
+        | Field.IP4Dst -> Syntax.IP4Dst (Int32.of_int64_exn v, 32l)
+        | Field.TCPSrcPort -> Syntax.TCPSrcPort (Int.of_int64_exn v)
+        | Field.TCPDstPort -> Syntax.TCPDstPort (Int.of_int64_exn v)
+        | _ -> failwith "unsupported header type"
+       )
+    | _ -> failwith "unsupported value type"
+
+
+  let program_from_path path =
+    List.fold path ~init:Syntax.id ~f:(fun prog tr ->
+        match tr with
+        | TrTest (true, (h,v)) -> Seq(Filter(Test(to_syntax (h,v))), prog)
+        | TrTest (false,(h,v)) -> Seq(Filter(Neg (Test(to_syntax (h,v)))), prog)
+        | TrMod (h,v) -> Seq( Mod(to_syntax(h,v)) , prog)
       )
 
-  (* Assume switches have no more than 64 ports, i.e. 6 bits for port id
+  let rec subsumed f path : bool =
+    match path with
+    | [] -> false
+    | ((x,_)::path') -> if f = x then true else subsumed f path'
+    
+  let mods_for_path (path : elt list) : (Field.t * Value.t) list =
+    List.filter_map path ~f:getmod
+    |> List.fold  ~init:[] ~f:(fun acc (h,v) -> if subsumed h acc
+                                                then acc
+                                                else (h, v)::acc)
+
+  let rec contradictory pred : bool = 
+    let rec contradicts f v pred =
+      match pred with
+      | [] -> false
+      | (true, (f', v'))::pred' -> f = f' && v <> v' || contradicts f v pred'
+      | (false, (f',v'))::pred' -> f = f' && v =  v' || contradicts f v pred'
+    in
+    match pred with
+    | None -> true
+    | Some [] -> false
+    | Some ((b, (f,v))::pred') -> 
+       if contradicts f v pred' then b else contradictory (Some pred')
+                  
+  let get_all_paths pol : ((((bool * (Field.t * Value.t)) list) option)
+                           * (int64 list)
+                           * (Field.t * Value.t) list) list =
+    (* Get Automaton *)
+    let auto = of_policy ~dedup:true ~cheap_minimize:true pol in
+    render auto;
+
+    (* Compute Paths *)
+    let rec collect_all_paths count (curr_id:int64) seen (path:(int64 * FDD.t) list) : (int64 * FDD.t) list list =
+      Printf.printf "recurse depth: %d\n" count;
+      Printf.printf "[";
+      List.iter path ~f:(fun (p,_) -> Printf.printf "%s," (Int64.to_string p));
+      Printf.printf "\t%s]\n" (Int64.to_string curr_id);
+      if S.mem seen curr_id then [[]] else
+      let seen' = S.add seen curr_id in                        (* prevent loops *)
+      let (e,d) as state = Tbl.find_exn auto.states curr_id in (* lookup current state*)
+      let succs = FDD.conts d |> Int64.Set.elements in         (* compute successor Fdds*)
+      let path_append x = path @ [(curr_id, x)] in             (* helper function to fdd to path *)
+
+      Printf.printf "Epath_length: %d\n" (List.length (path_append e));
+      
+      (*Initialize with path that ends on e *)
+      (* Recursively call on all of the successors *)
+      let start = if e <> FDD.drop then [path_append e] else [] in
+      let out = List.fold succs ~init:start ~f:(fun acc next_id ->
+                    collect_all_paths (count+1) next_id seen' (path_append d) @ acc ) in
+      List.iter out ~f:(fun p -> Printf.printf "outlength = %d\n" (List.length p));
+      out
+    in
+    
+    Printf.printf "COLLECTING PATHS\n";
+    let ps = collect_all_paths 0 auto.source S.empty [] in
+    let () = Printf.printf "--COLLECTED\n\nEXPANDING\n" in
+    let eps = expand_paths ps in
+    let () = Printf.printf "--EXPANDED\n" in
+    List.filter_map eps ~f:(fun p ->
+        let () = Printf.printf "Path [";
+                 List.iter p (fun e -> Printf.printf " %s," (string_of_elt e));
+                 Printf.printf "]\n"
+        in
+        let pred = predicate_for_path p in
+        let () = Printf.printf "Pred [";
+                 match pred with
+                 | None -> Printf.printf "None\n";
+                 | Some pred ->
+                    List.iter pred (fun (b,(h,v)) ->
+                     Printf.printf "(%B, (%s,%s))" b (Field.to_string h) (Value.to_string v));
+                    Printf.printf "]\n" in
+        let tr = trace_for_path p in
+        let mds = mods_for_path p in
+        if pred = None || tr = [] or mds = [] then None else
+          if contradictory pred then
+            None
+          else Some (pred,
+                     trace_for_path p,
+                     mods_for_path p))
+             
+  (* Assume switches have no more than 32 ports, i.e. 5 bits for port id
    * only cannibalize the ethDst address for now *)
   let cannibalize_packet pkt trace : packet =
-    let ethDst,_ = List.fold trace ~init:(Int64.zero, 7) (* new ethDst and counter*)
-                     ~f:(fun (stack, counter) ident ->
-                       if counter < 0 then failwith "Cannot support traces longer than 8 hops" else
-                         let trunced = Int64.(land) ident 63L in
-                         let shifted = Int64.shift_left trunced counter in
-                         (Int64.(lor) stack shifted, counter - 1)
-                     ) in
-    {pkt with headers = {pkt.headers with ethDst = ethDst}}
+    let rec cannibalize_mac trace counter mac =
+      match trace, counter with
+      | [], 0 -> mac
+      | _, 0 -> failwith "Packet trace is too long"
+      | [], i -> cannibalize_mac trace (i-1) (Int64.shift_left mac 6)
+      | (pt :: pts), i ->
+         if pt > 31L then failwith "Port takes more than 5 bits" else
+           let mac' = Int64.shift_left mac 6 |> Int64.(+) pt |> Int64.(+) 32L in
+           cannibalize_mac pts (i-1) mac'
+    in
+    { pkt with headers = {
+        pkt.headers with
+        ethDst = cannibalize_mac trace 8 0L
+      }
+    }
+                           
 
-
-  let flow_from_packet ~flow:match_pkt ~action:act_pkt ~port:next_hop : OpenFlow.flow =
+  let flow_from_packet ~flow:match_pkt ~action:act_pkt ~outport:next_hop ~match_inport:match_inport ~minimize:minimize : OpenFlow.flow =
     let open OpenFlow in
     let match_hvs = match_pkt.headers in
     let match_pat : Pattern.t =  {
@@ -727,33 +1083,36 @@ module Automaton = struct
         nwProto   = Some match_hvs.ipProto;
         tpSrc     = Some match_hvs.tcpSrcPort;
         tpDst     = Some match_hvs.tcpDstPort;
-        inPort    = match match_hvs.location with
-                    | Physical port -> Some port
-                    | _ -> None
+        inPort    = match match_hvs.location, match_inport with
+                    | Physical inport, true -> Some inport
+                    | _, _ -> None
                             
       } in
     let act_hvs = act_pkt.headers in
-    let act = [[[SetEthSrc act_hvs.ethSrc         |> Modify;
-                 SetEthDst act_hvs.ethDst         |> Modify;
-                 SetVlan (Some act_hvs.vlan)      |> Modify; (* EC: Why Does this expect an option type? *)
-                 SetVlanPcp act_hvs.vlan          |> Modify;
-                 SetEthTyp act_hvs.ethType        |> Modify;
-                 SetIPProto act_hvs.ipProto       |> Modify;
-                 SetIP4Src act_hvs.ipSrc          |> Modify;
-                 SetIP4Dst act_hvs.ipDst          |> Modify;
-                 SetTCPSrcPort act_hvs.tcpSrcPort |> Modify;       
-                 SetTCPDstPort act_hvs.tcpDstPort |> Modify;
-                 Physical next_hop |> Output
-              ]]] in
+    let ethSrcAct = if minimize && act_hvs.ethSrc = match_hvs.ethSrc then [] else [SetEthSrc act_hvs.ethSrc |> Modify] in
+    let ethDstAct = if minimize && act_hvs.ethDst = match_hvs.ethDst then [] else [SetEthDst act_hvs.ethDst |> Modify] in
+    let vlanAct = if minimize && act_hvs.vlan = match_hvs.vlan then [] else [SetVlan (Some act_hvs.vlan) |> Modify] in
+    let vlanPcpAct = if minimize && act_hvs.vlanPcp = match_hvs.vlanPcp then [] else [SetVlanPcp act_hvs.vlanPcp |> Modify] in
+    let ethTypeAct = if minimize && act_hvs.ethType = match_hvs.ethType then [] else [SetEthTyp act_hvs.ethType |> Modify] in
+    let ipProtoAct = if minimize && act_hvs.ipProto = match_hvs.ipProto then [] else [SetIPProto act_hvs.ipProto |> Modify] in
+    let ipSrcAct = if minimize && act_hvs.ipSrc = match_hvs.ipSrc then [] else [SetIP4Src act_hvs.ipSrc |> Modify ] in
+    let ipDstAct = if minimize && act_hvs.ipDst = match_hvs.ipDst then [] else [SetIP4Dst act_hvs.ipDst |> Modify ] in
+    let tcpSrcAct = if minimize && act_hvs.tcpSrcPort = match_hvs.tcpSrcPort then [] else [SetTCPSrcPort act_hvs.tcpSrcPort |> Modify] in
+    let tcpDstAct = if minimize && act_hvs.tcpDstPort = match_hvs.tcpDstPort then [] else [SetTCPDstPort act_hvs.tcpDstPort |> Modify] in
+    let outPort = [Physical next_hop |> Output] in
 
-    {pattern      = match_pat;
-     action       = act ;
-     cookie       = 0L;
-     idle_timeout = Permanent;
-     hard_timeout = Permanent;
-    }
+    
+    let act = List.concat [ethSrcAct; ethDstAct; vlanAct; vlanPcpAct; ethTypeAct;
+                           ipProtoAct; ipSrcAct; ipDstAct; tcpSrcAct; tcpDstAct;
+                           outPort] in
+    
+    { pattern      = match_pat;
+      action       = [[act]];
+      cookie       = 0L;
+      idle_timeout = Permanent;
+      hard_timeout = Permanent  }
 
-      
+
   (*
    * Input is going to be 
    *  -- a policy (as netkat programs)
@@ -765,60 +1124,44 @@ module Automaton = struct
    *  -- the identifier of the end switch
    *  -- the OpenFlow rules to reinstate the special packet on the end switch
    *)
-  let packet_tfx (policy:Syntax.policy) (topo:Syntax.policy) (pkt:packet) : ((switchId * OpenFlow.flow) * (switchId * OpenFlow.flow)) option =
+  let packet_tfx (policy:Syntax.policy) (pkt:packet) : ((switchId * OpenFlow.flow) * (switchId * OpenFlow.flow)) option =
     let open Option in
-    let fdd_trace =
-      pkt
-      |> (Syntax.(Star(Seq(policy, topo)))
-          |> fdd_trace_interp)
-    in
+    let fdd_trace = fdd_trace_interp policy pkt in
     match fdd_trace with
-    | [] -> None (*packet is dropped*)
+    | [] -> failwith "NONE>>>>>" (*None Packet is dropped*)
     | (out_pkt, trace)::[] ->
-       let port_stack = List.fold trace ~init:[]
-                          ~f:(fun acc fdd ->
-                            FDD.get_port_trace pkt fdd |> List.append acc) in
-       (match port_stack with 
+
+       (match trace with 
         | [] -> None
-        | first_hop :: port_stack' ->
-           let src_route_packet = cannibalize_packet out_pkt port_stack' in
+        | first_hop :: loc_trace' ->
+           let pt_trace' = List.map loc_trace' ~f:(fun l -> Syntax.getPhys l |> Int64.of_int32) in
+           let src_route_packet = cannibalize_packet out_pkt pt_trace' in
            let traversed_packet = {src_route_packet
                                   with headers = {src_route_packet.headers
                                                  with ethDst = 0L}} in
 
+           let first_hop_port = Syntax.getPhys first_hop in
+           let ingress_tfx = flow_from_packet ~flow:pkt
+                               ~action:src_route_packet
+                               ~outport:first_hop_port
+                               ~match_inport:true ~minimize:true
+                               in
            
-           (* [pkt] enters network at switch [pkt.switch], gets converted into [src_route_packet] on [pkt.switch]
-            * then [src_route_packet] traverses the network (to [out_pkt.switch]),  consuming the [ethDst] field along the way.
-            * then, [out_pkt.switch] converts the packet to [out_pkt], which is the packet that would've been output by the untransformed network
-            *)
-
-           (*Bind is in Option monad*)
-           Int64.to_int32 first_hop
-           >>= fun first_hop_port -> (
-
-             let ingress_tfx = flow_from_packet ~flow:pkt
-                                 ~action:src_route_packet
-                                 ~port:first_hop_port in
-             
-             (*Bind is in Option*)
-             List.last port_stack'
-             >>= Int64.to_int32
-             >>= fun egress_port -> (
+           (*Bind is in Option*)
+           let egress_port = getPhys out_pkt.headers.location in
+           let egress_tfx = flow_from_packet
+                              ~flow:traversed_packet
+                              ~action:out_pkt
+                              ~outport:egress_port
+                              ~match_inport:false
+                              ~minimize:true in
            
-               let egress_tfx = flow_from_packet ~flow:traversed_packet
-                                  ~action:out_pkt
-                                  ~port:egress_port in
-               
-               Some ((pkt.switch, ingress_tfx ),
-                     (out_pkt.switch, egress_tfx))
-             )
-           )
+           Some ((pkt.switch, ingress_tfx ),
+                 (out_pkt.switch, egress_tfx))
        )
-    | _::_ -> failwith "multicast is unsupported"
+    | _::_ -> failwith "multicast is unsupported (for now)"
                        
       
-  let render ?(format="pdf") ?(title="FDD") t =
-    Frenetic_kernel.Util.show_dot ~format ~title (to_dot t)
 
 end
 (* END: module Automaton *)                

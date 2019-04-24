@@ -36,6 +36,8 @@ type location =
   | Query of string
   [@@deriving sexp, compare]
 
+val getPhys : location -> int32
+  
 type header_val =
   | Switch of switchId
   | Location of location
@@ -83,6 +85,8 @@ type policy =
   | Dup
   [@@deriving sexp]
 
+val string_of_policy : policy -> string
+  
 val id : policy
 val drop : policy
 

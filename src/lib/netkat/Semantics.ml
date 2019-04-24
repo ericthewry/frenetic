@@ -38,7 +38,7 @@ module HeadersValues = struct
         ?(ipSrc = Int32.zero)
         ?(ipDst = Int32.zero)
         ?(tcpSrcPort = 0)
-        ?(tcpDstPort = 0) : t =
+        ?(tcpDstPort = 0) () : t =
     { location = location;
       from = from ;
       abstractLoc = abstractLoc;
@@ -111,7 +111,45 @@ type packet = {
   switch : switchId;
   headers : HeadersValues.t;
   payload : payload
-}
+  }
+
+let to_hvs pkt = Switch pkt.switch :: HeadersValues.to_hvs pkt.headers
+
+let make_packet ?(switch = 0L)
+      ?(location=Syntax.Physical Int32.zero)
+        ?(from = "")
+        ?(abstractLoc = "")
+        ?(ethSrc = Int64.zero)
+        ?(ethDst = Int64.zero)
+        ?(vlan = 0)
+        ?(vlanPcp = 0)
+        ?(vswitch = Int64.zero)
+        ?(vport = Int64.zero)
+        ?(ethType = 0)
+        ?(ipProto = 0)
+        ?(ipSrc = Int32.zero)
+        ?(ipDst = Int32.zero)
+        ?(tcpSrcPort = 0)
+        ?(tcpDstPort = 0) () : packet =
+  { switch = switch;
+    headers = { location = location;
+                from = from ;
+                abstractLoc = abstractLoc;
+                ethSrc = ethSrc;
+                ethDst = ethDst;
+                vlan = vlan;
+                vlanPcp = vlanPcp;
+                vswitch = vswitch;
+                vport = vport;
+                ethType = ethType;
+                ipProto = ipProto;
+                ipSrc = ipSrc;
+                ipDst = ipDst;
+                tcpSrcPort = tcpSrcPort;
+                tcpDstPort = tcpDstPort };
+    payload = Frenetic_kernel.OpenFlow.Buffered (0l, Cstruct.empty)}
+      
+
 
 module PacketSet = Set.Make (struct
   type t = packet sexp_opaque [@@deriving sexp]

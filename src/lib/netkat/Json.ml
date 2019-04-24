@@ -185,6 +185,176 @@ let rec pol_of_json (json : json) : policy =
                      json |> member "pt2" |> to_int |> int_to_uint32)
    | str -> raise (Invalid_argument ("invalid policy type " ^ str))
 
+let rec pol_of_topo_file str_file : (policy * policy) =
+  let json = from_file str_file in
+  let open Yojson.Basic.Util in
+  (* Printf.printf "%s\n" (pretty_to_string json); *)
+  let network_edge = json |> member "edge" |> to_list in
+  let links = json |> member "links" |> to_list in
+  let test_port_and_switch p s =
+    Filter(And(Test(Switch (Int.to_int64 s)),
+               Test(Location (Physical (Int.to_int32_exn p))))) in
+  let mklink sw1 pt1 sw2 pt2 =
+    Link(Int.to_int64 sw1, Int.to_int32_exn pt1,
+         Int.to_int64 sw2, Int.to_int32_exn pt2)
+  in
+  let edge_pol = List.fold network_edge ~init:drop ~f:(fun pol json_edge ->
+                     let switch = json_edge |> member "swId" |> to_int in
+                     let port = json_edge |> member "port" |> to_int in
+                     Union(pol, test_port_and_switch port switch ) 
+                   ) in
+  (* List.iter links ~f:(fun l -> Printf.printf "%s\n" (pretty_to_string l)); *)
+  let topo_pol = List.fold links ~init:drop ~f:(fun tpol topo_json ->
+                     let sw1 = topo_json |> member "swId1" |> to_int in
+                     let pt1 = topo_json |> member "port1" |> to_int in
+                     let sw2 = topo_json |> member "swId2" |> to_int in
+                     let pt2 = topo_json |> member "port2" |> to_int in
+                     Union(Union (tpol, mklink sw1 pt1 sw2 pt2), mklink sw2 pt2 sw1 pt1)
+                   ) in
+  
+  (edge_pol, topo_pol)
+
+let get_hval (field, value) : header_val =
+  let vint = Yojson.Basic.Util.to_int value in
+  match field with
+  | "switch" -> Switch (Int.to_int64 vint)
+  | "location" | "loc" | "port"-> Location (Physical (Int.to_int32_exn vint))
+  | "ethsrc" -> EthSrc (Int.to_int64 vint)
+  | "ethdst" -> EthDst (Int.to_int64 vint)
+  | "vlan" -> Vlan vint
+  | "vlanpcp" | "vlanPCP" -> VlanPcp vint
+  | "ethtype" | "EthType" | "type" -> EthType vint
+  | "proto" | "ipproto" -> IPProto vint
+  | "ipv4src" | "ipsrc" -> IP4Src (Int.to_int32_exn vint, 32l)
+  | "ipv4dst" | "ipdst" -> IP4Dst (Int.to_int32_exn vint, 32l)
+  | "TCPSrcPort" | "tcpsrcport" | "srcport" -> TCPSrcPort vint
+  | "TCPDstPort" | "tcpdstport" | "dstport" -> TCPDstPort vint
+  | _ -> failwith ("unrecognized field" ^ field)
+
+      
+let rec pol_of_act act : policy =
+  match act with
+  | `Assoc assoc ->
+     (match assoc with
+      | [] -> id
+      | (hv :: rst) ->
+         let rest = pol_of_act (`Assoc rst) in
+         Seq(Mod(get_hval hv), rest)
+     )                            
+  | _ -> failwith "malformed json, expected json object" 
+
+let rec pred_of_match (mtch : json) : pred =
+  match mtch with
+  | `Assoc assoc ->
+     (match assoc with
+      | [] -> True
+      | (hv :: rst) ->
+         let rest = pred_of_match (`Assoc rst) in
+         And(Test(get_hval hv), rest)
+     )                            
+  | _ -> failwith "malformed json, expected json object" 
+
+let pol_of_switch (switch:json) : policy =
+  let open Yojson.Basic.Util in
+  let switch_id = switch |> member "swId" |> to_int in
+  let entries = switch |> member "entries" |> to_list in
+  let pol = List.fold entries ~init:drop
+              ~f:(fun elsepol entry ->                
+                let mtch = entry |> member "match" |> to_list in
+                let act = entry |> member "action" |> to_list in
+                let matchtest = List.fold mtch ~init:True
+                                  ~f:(fun acc m -> And(acc,pred_of_match m)) in
+                let actpol = List.fold act ~init:id
+                               ~f:(fun acc act -> Seq(acc, pol_of_act act)) in
+                Union(Seq(Filter(matchtest), actpol), Seq(Filter(Neg matchtest), elsepol))
+              ) in
+  Seq(Filter(Test(Switch (Int.to_int64 switch_id))), pol)
+
+     
+let pol_of_tables_file str_file : policy =
+  let json = from_file str_file in
+  let open Yojson.Basic.Util in
+  let switches = json |> member "switches" |> to_list in
+
+  List.fold switches ~init:drop
+    ~f:(fun pol switch ->
+      Union(pol, pol_of_switch switch))
+
+let string_of_field f =
+  let open Fdd.Field in
+  match f with
+  | Switch -> "switch"
+  | Location -> "port"
+  | EthType -> "ethtype"
+  | IPProto -> "ipproto"
+  | EthSrc -> "ethsrc"
+  | EthDst -> "ethdst"
+  | IP4Src -> "ipv4src"
+  | IP4Dst -> "ipv4dst"
+  | TCPSrcPort -> "tcpsrcport"
+  | TCPDstPort -> "tcpdstport"
+  | _ -> failwith "unsupported field"
+    
+let path_to_json ((precond, port_list, mod_list) :
+                    ((bool * (Fdd.Field.t * Fdd.Value.t)) list option )
+                    * int64 list
+                    * (Fdd.Field.t * Fdd.Value.t) list ) : json option =
+  let open Option in
+  precond >>= fun cond_list ->
+     let json_of_val v : json option = match v with
+       | Fdd.Value.Const i -> Some( `Int (Int.of_int64_exn i))
+       | _ -> None
+     in
+     (* let () = Printf.printf "[";
+      *          List.iter cond_list ~f:(fun (b, (f, vl)) ->
+      *              let v = match vl with | Const v -> v
+      *                                    | Mask (v,bits) -> if bits = 32 or bits = 64
+      *                                                       then v
+      *                                                       else failwith "Non-exact match not supp'd"
+      *                                    | AbstractLocation _ -> failwith "Abstract Loc Not Handled"
+      *                                    | Pipe _ -> failwith "Pipe not handled"
+      *                                    | Query _ -> failwith "Query Not Handled"
+      *                                    | FastFail _ -> failwith "FastFail not handled"
+      *              in
+      *              Printf.printf "%B (%s, %d)," b (string_of_field f) (Int.of_int64_exn v));
+      *          Printf.printf "]\n" *)
+     (* in *)
+     let switch = List.fold cond_list ~init:None ~f:(fun res (b, (f,v)) ->
+                      match b, f with
+                      | true, Fdd.Field.Switch -> Some v
+                      | _, _ -> res)
+                  >>= json_of_val
+     in
+     let prec_json =
+       List.filter_map cond_list ~f:(fun (b, hv) -> if b then Some hv else None)
+       |> List.filter_map ~f:(fun (h, v) ->
+              json_of_val v >>= fun jval ->
+              Some (string_of_field h, jval) )
+      in
+      let ports_json =
+        List.map port_list ~f:(fun p -> `Int (Int.of_int64_exn p))
+      in
+      let mods_json : json list =
+        List.filter_map mod_list
+          ~f:(fun (f, v) ->
+            json_of_val v >>= fun jval ->
+            `Assoc [(string_of_field f, jval)] |> Some
+          )
+      in
+      switch >>= fun sw ->
+      `Assoc [("switch", sw);
+              ("precondition", `Assoc prec_json);
+              ("ports", `List ports_json);
+              ("final_packet", `List mods_json)]
+      |> Some
+     
+  
+let paths_to_json_string paths : string =
+  let json_list = List.filter_map paths ~f:path_to_json in
+  pretty_to_string (`Assoc [("rules", `List json_list)])
+  
+
+    
 (* by default, Yojson produces non-standard JSON *)
 let policy_to_json_string (pol : policy) : string =
   Yojson.Basic.to_string ~std:true (policy_to_json pol)

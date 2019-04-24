@@ -16,10 +16,24 @@ open Syntax
 
 (** Deserialize a Yojson repesentation of a NetKAT policy *)
 val pol_of_json : json -> policy
+                                   
 
 (** Serialize a NetKAT policy to Yojson format.  Note: errors may occur when converting between 64-bit values and
     JSON-representable integers. *)
 val policy_to_json : policy -> json
+
+                                 
+(** Deserialize a Yojson representation of Topology **)
+val pol_of_topo_file : string -> (policy * policy)
+val pol_of_tables_file : string -> policy
+
+(** Serialize Paths into Json String **)
+val paths_to_json_string : (((bool * (Fdd.Field.t * Fdd.Value.t)) list option )
+                            * int64 list
+                            * (Fdd.Field.t * Fdd.Value.t) list
+                           ) list
+                           -> string
+
 
 val from_json_header_val : json -> header_val
 

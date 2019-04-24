@@ -206,7 +206,8 @@ let main : Command.t =
     ; ("openflow13", openflow13_controller)
     ; ("fault-tolerant", openflow13_fault_tolerant_controller)
     ; ("portless-controller", portless_controller)
-    ; ("dump", Dump.main)]
+    ; ("dump", Dump.main)
+    ; ("edge", Edge.main)]
 
 let () =
   Frenetic.Util.pp_exceptions ();

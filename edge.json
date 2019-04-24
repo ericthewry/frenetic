@@ -1,0 +1,16 @@
+{
+  "rules": [
+    {
+      "switch": 0,
+      "precondition": { "switch": 0, "port": 10, "ethdst": 0 },
+      "ports": [ 10 ],
+      "final_packet": [ { "port": 10 } ]
+    },
+    {
+      "switch": 100,
+      "precondition": { "switch": 100, "port": 10, "ethdst": 100 },
+      "ports": [ 10 ],
+      "final_packet": [ { "port": 10 } ]
+    }
+  ]
+}

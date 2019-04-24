@@ -745,6 +745,13 @@ module FDD = struct
           | None -> acc
           | Some k -> Value.to_int64_exn k |> Int64.Set.add acc))
       ~g:(fun _ t f -> Set.union t f)
+      
+  let act_cont act =
+    let continuations = const act |> conts in
+    match Int64.Set.elements continuations with
+    | [] -> None
+    | [x] -> Some x
+    | _ -> failwith "Action had multiple continuations -- Cannot Handle Multicast"
 
   let map_conts fdd ~(f: int64 -> int64) =
     let open Action in
@@ -777,25 +784,51 @@ module FDD = struct
     ]
       
           
-  let get_port_trace packet fdd =
+  let get_port packet fdd =
     let rstr_fdd = restrict (to_vals packet) fdd in
-    fold rstr_fdd
-      ~f:(fun action ->
-        Action.fold_fv action ~init:[] ~f:(fun locs ~field ~value ->
-            match field, value with
-            | Location, Const port -> List.cons port locs
-            | _ -> []
-          )
-      )
-      (* because rstr_fdd was restricted by a (complete) packet, 
-       * either acc_true or acc_false will be [] *)
-      ~g:(fun _ acc_true acc_false  ->
-          match acc_true, acc_false with
-          | [], _ -> acc_false
-          | _, [] -> acc_true
-          | _, _ -> failwith "Malformed FDD had non-empty action set on two branches"
-      )
+    Printf.printf "RSTR: %s\n" (to_string rstr_fdd);
+    let action =
+      fold rstr_fdd
+        ~f:(fun x -> Some x)
+        ~g:(fun (_,_) tru fls ->
+          match tru,fls with
+          | None, None -> failwith "expect an action"
+          | Some _, Some _ -> failwith "expect only one action"
+          | Some _, _ -> tru
+          | _, Some _ -> fls)
+    |> Option.value_exn in                          
+                          
+    let open Syntax in
+    let rec get_port_from_policy p = match p with
+      | Mod(Location(Physical i)) -> Some i
+      | Mod(Location(_)) -> failwith "Ports must be Physical"
+      | Mod(_) -> None
+      | Filter _ -> None
+      | Dup -> None
+      | Seq(p,q) -> (match get_port_from_policy q with
+                     | None -> get_port_from_policy p
+                     | Some port -> Some port)
+      |  _ -> failwith "Actions should produce sequences"
+    in
 
+    Action.to_policy action
+    |> get_port_from_policy
+
+  let rec paths (fdd:t) : ((bool * v) list * r) list =
+    Printf.printf "FDD: %s\n" (to_string fdd);
+    match unget fdd with
+    | Leaf act -> [([],act)]
+    | Branch {test=(f,v); tru=lt; fls=lf; all_fls=_} ->
+       Printf.printf "\t%s = %s\n" (Field.to_string f) (Value.to_string v);
+       let addfvAs b (path,act) = (((b,(f,v)) :: path), act) in
+       (*ORDER IS IMPORTANT -- True branch must come before false branch *)
+       let () = Printf.printf "RecurseTruee\n" in
+       let trutree = List.map (paths lt) ~f:(addfvAs true) in
+       let () = Printf.printf "RecurseFalse\n" in
+       let flstree = List.map (paths lf) ~f:(addfvAs false) in
+       trutree @ flstree
+
+                
   let equivalent t1 t2 =
     (* A context represents the set of packets that can reach a certain node.
        It is implemented simply as a partial map from fields to values.

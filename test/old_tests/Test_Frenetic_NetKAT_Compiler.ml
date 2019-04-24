@@ -652,3 +652,9 @@ let%test "adds matches for ethTyp and ipProto on tcp/udp dependencies" =
     flow match_all []
   ]
 
+
+let%test "Testing Runs of the Automaton" =
+  let auto_eval_equal (pol, pkt) =
+    Semantics.eval pkt pol != fst (Global_compiler.Automaton.packet_tfx pol Syntax.id pkt)
+  in
+  check gen_pol_1 auto_eval_equal

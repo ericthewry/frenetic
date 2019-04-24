@@ -270,10 +270,12 @@ module FDD : sig
     with type r = Action.t
     and  type v = Field.t * Value.t
 
+  val paths : t -> ((bool * v) list * r) list                          
   val mk_cont : int64 -> t
   val conts : t -> Int64.Set.t
+  val act_cont : r -> int64 option
   val map_conts : t -> f:(int64 -> int64) -> t
   val to_vals : packet -> v list
-  val get_port_trace : packet -> t -> int64 list
+  val get_port : packet -> t -> int32 option
   val equivalent : t -> t -> bool
 end

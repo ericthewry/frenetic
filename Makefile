@@ -1,7 +1,7 @@
 INSTALL_ARGS := $(if $(PREFIX),--prefix $(PREFIX),)
 
 build:
-	time -p dune build @install
+	time -p dune build @install --profile release
 
 install: build
 	dune install $(INSTALL_ARGS)
@@ -18,7 +18,7 @@ doc:
 	dune build @doc
 
 test:
-	dune runtest
+	dune runtest --profile release
 
 updatetest:
 	dune runtest --auto-promote

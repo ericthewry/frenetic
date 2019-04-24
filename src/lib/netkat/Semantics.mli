@@ -45,6 +45,7 @@ module HeadersValues : sig
             -> ?ipDst:int32
             -> ?tcpSrcPort:tpPort
             -> ?tcpDstPort:tpPort
+            -> unit
             -> t
 
   val compare : t -> t -> int
@@ -56,8 +57,29 @@ type packet = {
   switch : switchId;
   headers : HeadersValues.t;
   payload : payload
-}
+  }
 
+val to_hvs : packet -> header_val list
+
+val make_packet: ?switch:switchId
+                 -> ?location:location
+                 -> ?from:abstract_location
+                 -> ?abstractLoc:abstract_location
+                 -> ?ethSrc:int64 
+                 -> ?ethDst:int64 
+                 -> ?vlan:int16
+                 -> ?vlanPcp:dlVlanPcp
+                 -> ?vswitch:int64
+                 -> ?vport:int64
+                 -> ?ethType:dlTyp
+                 -> ?ipProto:nwProto
+                 -> ?ipSrc:int32
+                 -> ?ipDst:int32
+                 -> ?tcpSrcPort:tpPort
+                 -> ?tcpDstPort:tpPort
+                 -> unit
+                 -> packet
+                                  
 module PacketSet : Set.S
   with type Elt.t = packet
 
