@@ -815,16 +815,16 @@ module FDD = struct
     |> get_port_from_policy
 
   let rec paths (fdd:t) : ((bool * v) list * r) list =
-    Printf.printf "FDD: %s\n" (to_string fdd);
+    (* Printf.printf "FDD: %s\n" (to_string fdd); *)
     match unget fdd with
     | Leaf act -> [([],act)]
     | Branch {test=(f,v); tru=lt; fls=lf; all_fls=_} ->
-       Printf.printf "\t%s = %s\n" (Field.to_string f) (Value.to_string v);
+       (* Printf.printf "\t%s = %s\n" (Field.to_string f) (Value.to_string v); *)
        let addfvAs b (path,act) = (((b,(f,v)) :: path), act) in
        (*ORDER IS IMPORTANT -- True branch must come before false branch *)
-       let () = Printf.printf "RecurseTruee\n" in
+       (* let () = Printf.printf "RecurseTruee\n" in *)
        let trutree = List.map (paths lt) ~f:(addfvAs true) in
-       let () = Printf.printf "RecurseFalse\n" in
+       (* let () = Printf.printf "RecurseFalse\n" in *)
        let flstree = List.map (paths lf) ~f:(addfvAs false) in
        trutree @ flstree
 

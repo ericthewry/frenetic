@@ -87,7 +87,7 @@ module Pol = struct
         | Some ing ->
           Optimize.(mk_and (Test (Switch s2)) (mk_not ing))
           |> mk_filter in
-      mk_big_seq [filter_loc s1 p1; Dup; link; Dup; post_link]
+      mk_big_seq [filter_loc s1 p1; Dup; link; (*Dup;*) post_link]
     (*ingress Dup is commented out for EdgeOF*)
     | VLink (s1,p1,s2,p2) ->
       let link = mk_seq (mk_mod (VSwitch s2)) (mk_mod (VPort p2)) in
@@ -730,34 +730,7 @@ module Automaton = struct
   let mk_trtest b fv : elt =  TrTest (b, fv)
 
   let uncurry f (x,y) = f x y
-                   
-              
-  (*Expand a single path into all paths through the automaton*)
-  let rec expand_one_path (path: (int64 * FDD.t) list) : elt list list= 
-    match path with
-    | [] -> []
-    | [(_,fdd)] ->
-       List.map (FDD.paths fdd)
-         ~f:(fun (test_list, action) ->
-           List.fold test_list ~init:[]
-             ~f:(fun acc (b, test) -> acc @ [mk_trtest b test] )
-           @ mk_trmods action
-         )
-    | ((_,fdd)::(nextid,fdd')::fdds) ->
-       List.fold (FDD.paths fdd) ~init:[]
-         ~f:(fun accum (path, action) ->
-           let trace = List.map path ~f:(fun (b, hv) -> mk_trtest b hv) @ mk_trmods action in
-           
-           match FDD.act_cont action with
-           | None ->
-              Printf.printf "CONTINUATION\n";
-              trace :: accum
-           | Some id -> (*if id = nextid then*)
-              let () = Printf.printf "CONTINUATION\n" in
-              let rec_paths = expand_one_path( (nextid, fdd') :: fdds )  in
-                            (List.map ~f:(fun p -> trace @ p) rec_paths) @ accum
-                         (*else accum*)
-         )
+
       
   let eliminate head valu (cond: (bool * (Field.t * Value.t)) list) =
     let open Option in
@@ -772,33 +745,6 @@ module Automaton = struct
           else None (*Trace is a contradiction *)
       )
       
-  (*Expand paths through automaton to paths through FDDS*)
-  let expand_paths paths : elt list list =
-    let paths = List.fold paths ~init:[]
-                  ~f:(fun acc p ->
-                    Printf.printf "pathlength :: %d\n" (List.length p);
-                    expand_one_path p @ acc)
-    in
-    Printf.printf "Expanded Paths: \n[\n";
-    List.iter paths ~f:(fun path ->
-        Printf.printf "\t[ ";
-        List.iter path ~f:(fun e ->
-            Printf.printf "%s," (string_of_elt e);
-          );
-        Printf.printf "],\n"
-      );
-    Printf.printf "]\n";
-    paths
-
-  (* Assume [prec] is sat *)
-  let simplify_precondition prec : (bool * (Field.t * Value.t)) list = prec
-    (* let (truths, falses) = List.partition_tf ~f:fst prec in
-     * let member_of_truths f = List.fold truths ~init:false
-     *                            ~f:(fun acc (b, (h,v)) ->
-     *                              if h = f then true else acc ) in
-     * let falses' = List.filter falses ~f:(fun (_, (h, _)) ->  member_of_truths h ) in
-     * truths @ falses' *)
-
   (* a path is a list of tagged predicates and actions
    * predicate is a weakest precondition (expressed as a list of matches) to complete that path
    * trace is the list of port-assignments in that path
@@ -826,148 +772,6 @@ module Automaton = struct
         | _  -> accum
       )
       
-  (*PRE:: each header only appears once in precond *)
-  let packet_satisfying (precond : (bool * (Field.t * Value.t)) list) =
-    let precond_true = List.filter precond ~f:fst in
-    let packet_sat_true = List.fold precond_true ~init:(make_packet ()) ~f:(fun pkt (b,(h,v)) ->
-                              match v with
-                              | Const res -> 
-                                 (match h with
-                                  | Field.Switch -> {pkt with switch = res }
-                                  | Field.Location -> {pkt with headers = {pkt.headers with location = Physical (Int32.of_int64_exn res)}}
-                                  | Field.Vlan -> {pkt with headers = {pkt.headers with vlan = Int.of_int64_exn res }}
-                                  | Field.VlanPcp -> {pkt with headers = {pkt.headers with vlanPcp = Int.of_int64_exn res }}
-                                  | Field.EthType -> {pkt with headers = {pkt.headers with ethType = Int.of_int64_exn res }}
-                                  | Field.IPProto -> {pkt with headers = {pkt.headers with ipProto = Int.of_int64_exn res }}
-                                  | Field.EthSrc -> {pkt with headers = {pkt.headers with ethSrc = res }}
-                                  | Field.EthDst -> {pkt with headers = {pkt.headers with ethDst = res}}
-                                  | Field.IP4Src -> {pkt with headers = {pkt.headers with ipSrc = Int32.of_int64_exn res }}
-                                  | Field.IP4Dst -> {pkt with headers = {pkt.headers with ipDst = Int32.of_int64_exn res }}
-                                  | Field.TCPSrcPort -> {pkt with headers = {pkt.headers with tcpSrcPort = Int.of_int64_exn res}}
-                                  | Field.TCPDstPort -> {pkt with headers = {pkt.headers with tcpDstPort = Int.of_int64_exn res}}
-                                  | _ -> failwith "Unsupported header field")
-                              | _ -> failwith "unsupported value type"
-                            ) in
-    let precond_false = List.filter precond ~f:(fun p -> not (fst p)) in
-    let packet_unsat_false = List.fold precond_false ~init:packet_sat_true ~f:(fun pkt (b, (h, v)) ->
-                                 match v with
-                                 | Const res ->
-                                    (match h with
-                                     | Field.Switch -> if pkt.switch = res
-                                                       then {pkt with switch = Int64.(+) res 1L}
-                                                       else pkt
-                                     | Field.Location -> if pkt.headers.location = Physical (Int32.of_int64_exn res)
-                                                         then {pkt with headers = {
-                                                                  pkt.headers with
-                                                                  location = Physical (Int32.(+) 1l (Int32.of_int64_exn res))}}
-                                                         else pkt
-                                     | Field.Vlan -> if pkt.headers.vlan = Int.of_int64_exn res
-                                                     then {pkt with headers = {
-                                                              pkt.headers with
-                                                              vlan = Int.of_int64_exn res
-                                                            }
-                                                          }
-                                                     else pkt
-                                     | Field.VlanPcp -> if pkt.headers.vlanPcp = Int.of_int64_exn res
-                                                        then {pkt with headers = {
-                                                                 pkt.headers with
-                                                                 vlanPcp = Int.of_int64_exn res
-                                                               }
-                                                             }
-                                                        else pkt
-                                     | Field.EthType -> if pkt.headers.ethType = Int.of_int64_exn res
-                                                        then {pkt with headers = {
-                                                                 pkt.headers with
-                                                                 ethType = Int.of_int64_exn res
-                                                               }
-                                                             }
-                                                        else pkt
-                                     | Field.IPProto -> if pkt.headers.ipProto = Int.of_int64_exn res
-                                                        then {pkt with headers = {
-                                                                 pkt.headers with
-                                                                 ipProto = Int.of_int64_exn res
-                                                               }
-                                                             }
-                                                        else pkt
-                                     | Field.EthSrc -> if pkt.headers.ethSrc = res
-                                                       then {pkt with headers = {
-                                                                pkt.headers with
-                                                                ethSrc = res
-                                                              }
-                                                            }
-                                                       else pkt
-                                     | Field.EthDst -> if pkt.headers.ethDst = res
-                                                       then {pkt with headers = {
-                                                                pkt.headers with
-                                                                ethDst= res
-                                                              }
-                                                            }
-                                                       else pkt
-                                     | Field.IP4Src -> if pkt.headers.ipSrc = Int32.of_int64_exn res
-                                                       then {pkt with headers = {
-                                                                pkt.headers with
-                                                                ipSrc = Int32.of_int64_exn res
-                                                              }
-                                                            }
-                                                       else pkt
-                                     | Field.IP4Dst -> if pkt.headers.ipDst = Int32.of_int64_exn res
-                                                       then {pkt with headers = {
-                                                                pkt.headers with
-                                                                ipDst = Int32.of_int64_exn res
-                                                              }
-                                                            }
-                                                       else pkt
-                                     | Field.TCPSrcPort -> if pkt.headers.tcpSrcPort = Int.of_int64_exn res
-                                                           then {pkt with headers = {
-                                                                    pkt.headers with
-                                                                    tcpSrcPort = Int.of_int64_exn res
-                                                                  }
-                                                                }
-                                                           else pkt
-                                     | Field.TCPDstPort -> if pkt.headers.tcpDstPort = Int.of_int64_exn res
-                                                           then {pkt with headers = {
-                                                                    pkt.headers with
-                                                                    tcpDstPort = Int.of_int64_exn res
-                                                                  }
-                                                                }
-                                                           else pkt
-                                     | _ -> failwith "unsupported field type"
-                                                     
-                                    )
-                                 | _ -> failwith "unsupported value type"
-                               ) in
-    packet_unsat_false
-
-
-  let to_syntax ((header, value) : (Field.t * Value.t)) : Syntax.header_val =
-    match value with
-    | Const v -> 
-       (match header with
-        | Field.Switch -> Syntax.Switch v
-        | Field.Location -> Syntax.Location (Physical (Int32.of_int64_exn v))
-        | Field.EthSrc -> Syntax.EthSrc v
-        | Field.EthDst -> Syntax.EthDst v
-        | Field.Vlan -> Syntax.Vlan (Int.of_int64_exn v)
-        | Field.VlanPcp -> Syntax.VlanPcp (Int.of_int64_exn v)
-        | Field.EthType -> Syntax.EthType (Int.of_int64_exn v)
-        | Field.IPProto -> Syntax.IPProto (Int.of_int64_exn v)
-        | Field.IP4Src -> Syntax.IP4Src (Int32.of_int64_exn v, 32l) (* Exact Matches Only *)
-        | Field.IP4Dst -> Syntax.IP4Dst (Int32.of_int64_exn v, 32l)
-        | Field.TCPSrcPort -> Syntax.TCPSrcPort (Int.of_int64_exn v)
-        | Field.TCPDstPort -> Syntax.TCPDstPort (Int.of_int64_exn v)
-        | _ -> failwith "unsupported header type"
-       )
-    | _ -> failwith "unsupported value type"
-
-
-  let program_from_path path =
-    List.fold path ~init:Syntax.id ~f:(fun prog tr ->
-        match tr with
-        | TrTest (true, (h,v)) -> Seq(Filter(Test(to_syntax (h,v))), prog)
-        | TrTest (false,(h,v)) -> Seq(Filter(Neg (Test(to_syntax (h,v)))), prog)
-        | TrMod (h,v) -> Seq( Mod(to_syntax(h,v)) , prog)
-      )
-
   let rec subsumed f path : bool =
     match path with
     | [] -> false
@@ -975,192 +779,110 @@ module Automaton = struct
     
   let mods_for_path (path : elt list) : (Field.t * Value.t) list =
     List.filter_map path ~f:getmod
+    |> List.rev
     |> List.fold  ~init:[] ~f:(fun acc (h,v) -> if subsumed h acc
                                                 then acc
                                                 else (h, v)::acc)
 
-  let rec contradictory pred : bool = 
-    let rec contradicts f v pred =
-      match pred with
-      | [] -> false
-      | (true, (f', v'))::pred' -> f = f' && v <> v' || contradicts f v pred'
-      | (false, (f',v'))::pred' -> f = f' && v =  v' || contradicts f v pred'
-    in
+  let rec contradictory pred : bool =
     match pred with
     | None -> true
     | Some [] -> false
-    | Some ((b, (f,v))::pred') -> 
-       if contradicts f v pred' then b else contradictory (Some pred')
+    | Some (prop::pred') ->
+       List.mem pred' prop ~equal:(fun (b,(f,v)) (b',(f',v')) ->
+           
+           if f <> f' then false
+           else if b && b' then v <> v'
+           else if b && not b' || not b && b' then v = v'
+           else false
+         ) || contradictory (Some pred')
                   
   let get_all_paths pol : ((((bool * (Field.t * Value.t)) list) option)
                            * (int64 list)
                            * (Field.t * Value.t) list) list =
+    let open Option in
+    
     (* Get Automaton *)
     let auto = of_policy ~dedup:true ~cheap_minimize:true pol in
     render auto;
 
-    (* Compute Paths *)
-    let rec collect_all_paths count (curr_id:int64) seen (path:(int64 * FDD.t) list) : (int64 * FDD.t) list list =
-      Printf.printf "recurse depth: %d\n" count;
-      Printf.printf "[";
-      List.iter path ~f:(fun (p,_) -> Printf.printf "%s," (Int64.to_string p));
-      Printf.printf "\t%s]\n" (Int64.to_string curr_id);
-      if S.mem seen curr_id then [[]] else
-      let seen' = S.add seen curr_id in                        (* prevent loops *)
-      let (e,d) as state = Tbl.find_exn auto.states curr_id in (* lookup current state*)
-      let succs = FDD.conts d |> Int64.Set.elements in         (* compute successor Fdds*)
-      let path_append x = path @ [(curr_id, x)] in             (* helper function to fdd to path *)
-
-      Printf.printf "Epath_length: %d\n" (List.length (path_append e));
-      
-      (*Initialize with path that ends on e *)
-      (* Recursively call on all of the successors *)
-      let start = if e <> FDD.drop then [path_append e] else [] in
-      let out = List.fold succs ~init:start ~f:(fun acc next_id ->
-                    collect_all_paths (count+1) next_id seen' (path_append d) @ acc ) in
-      List.iter out ~f:(fun p -> Printf.printf "outlength = %d\n" (List.length p));
-      out
+    let rec repeat str n =
+      if n = 0 then ""
+      else str ^ repeat str (n-1)
     in
-    
+
+    let rec collect_all_paths' count (f:FDD.t) (path:(FDD.t * bool) list) : (FDD.t * bool) list list =
+      Printf.printf "%s%s\n" (repeat "   " count) (FDD.to_string f);
+      if List.mem ~equal:(fun (f,_) (f',_) -> f = f') path (f,true) then [] else
+        let path' b = (f,b)::path in
+        let successors = (FDD.conts f) in
+        let path_is_terminal = Int64.Set.is_empty successors in
+        
+        match FDD.unget f with 
+        | FDD.Leaf a ->
+           if FDD.to_string f = "0" then []
+           else if path_is_terminal then [path' true]
+           else
+             (* fold over the successor states *)
+             Set.fold successors ~init:[] ~f:(fun paths next_state ->
+                 (*Get the two possible next FDDs*)
+                 Printf.printf "%s=====STATE %s=====\n" (repeat "   " count) (Int64.to_string next_state);
+                 let (e,d) = Tbl.find_exn auto.states next_state in
+                 (*get the paths for each fdd  *)
+                 collect_all_paths' (count+1) e (path' true)
+                 @ collect_all_paths' (count+1) d (path' true)
+               )
+
+        | FDD.Branch {test=t; tru=tfdd; fls=ffdd; all_fls=_} ->
+           (*Get the paths for each fdd*)
+           collect_all_paths' (count + 1) tfdd (path' true)
+           @ collect_all_paths' (count+1) ffdd (path' false)
+    in
+
+    let rec expand_one_path (path : (FDD.t * bool) list) : elt list =
+      List.fold path ~init:[] ~f:(fun acc (fdd, b) ->
+          match FDD.unget fdd with
+          | Leaf a ->
+             mk_trmods a
+             @ acc
+          | Branch {test=t; tru=_;fls=_;all_fls=_} ->
+             TrTest (b,t) :: acc
+        )
+    in
+
+    let rec dedup (prec: (bool * (Field.t * Value.t)) list option) : (bool * (Field.t * Value.t)) list option =
+      prec >>= fun prec' -> 
+        List.remove_consecutive_duplicates prec' ~which_to_keep:`First ~equal:(=) |> Some
+    in
+
     Printf.printf "COLLECTING PATHS\n";
-    let ps = collect_all_paths 0 auto.source S.empty [] in
+    let (e,d) = Tbl.find_exn auto.states auto.source in
+    let ps = collect_all_paths' 0 e []
+             @ collect_all_paths' 0 d []
+    in 
     let () = Printf.printf "--COLLECTED\n\nEXPANDING\n" in
-    let eps = expand_paths ps in
+    let eps = List.map ~f:expand_one_path ps in
     let () = Printf.printf "--EXPANDED\n" in
     List.filter_map eps ~f:(fun p ->
         let () = Printf.printf "Path [";
                  List.iter p (fun e -> Printf.printf " %s," (string_of_elt e));
                  Printf.printf "]\n"
         in
-        let pred = predicate_for_path p in
+        let prec = predicate_for_path p |> dedup in
         let () = Printf.printf "Pred [";
-                 match pred with
+                 match prec with
                  | None -> Printf.printf "None\n";
-                 | Some pred ->
-                    List.iter pred (fun (b,(h,v)) ->
+                 | Some prec ->
+                    List.iter prec (fun (b,(h,v)) ->
                      Printf.printf "(%B, (%s,%s))" b (Field.to_string h) (Value.to_string v));
                     Printf.printf "]\n" in
         let tr = trace_for_path p in
         let mds = mods_for_path p in
-        if pred = None || tr = [] or mds = [] then None else
-          if contradictory pred then
-            None
-          else Some (pred,
-                     trace_for_path p,
-                     mods_for_path p))
-             
-  (* Assume switches have no more than 32 ports, i.e. 5 bits for port id
-   * only cannibalize the ethDst address for now *)
-  let cannibalize_packet pkt trace : packet =
-    let rec cannibalize_mac trace counter mac =
-      match trace, counter with
-      | [], 0 -> mac
-      | _, 0 -> failwith "Packet trace is too long"
-      | [], i -> cannibalize_mac trace (i-1) (Int64.shift_left mac 6)
-      | (pt :: pts), i ->
-         if pt > 31L then failwith "Port takes more than 5 bits" else
-           let mac' = Int64.shift_left mac 6 |> Int64.(+) pt |> Int64.(+) 32L in
-           cannibalize_mac pts (i-1) mac'
-    in
-    { pkt with headers = {
-        pkt.headers with
-        ethDst = cannibalize_mac trace 8 0L
-      }
-    }
-                           
-
-  let flow_from_packet ~flow:match_pkt ~action:act_pkt ~outport:next_hop ~match_inport:match_inport ~minimize:minimize : OpenFlow.flow =
-    let open OpenFlow in
-    let match_hvs = match_pkt.headers in
-    let match_pat : Pattern.t =  {
-        dlSrc     = Some match_hvs.ethSrc;
-        dlDst     = Some match_hvs.ethDst;
-        dlTyp     = Some match_hvs.ethType;
-        dlVlan    = Some match_hvs.vlan;
-        dlVlanPcp = Some match_hvs.vlanPcp;
-        nwSrc     = Some (match_hvs.ipSrc, 32l);
-        nwDst     = Some (match_hvs.ipDst, 32l);
-        nwProto   = Some match_hvs.ipProto;
-        tpSrc     = Some match_hvs.tcpSrcPort;
-        tpDst     = Some match_hvs.tcpDstPort;
-        inPort    = match match_hvs.location, match_inport with
-                    | Physical inport, true -> Some inport
-                    | _, _ -> None
-                            
-      } in
-    let act_hvs = act_pkt.headers in
-    let ethSrcAct = if minimize && act_hvs.ethSrc = match_hvs.ethSrc then [] else [SetEthSrc act_hvs.ethSrc |> Modify] in
-    let ethDstAct = if minimize && act_hvs.ethDst = match_hvs.ethDst then [] else [SetEthDst act_hvs.ethDst |> Modify] in
-    let vlanAct = if minimize && act_hvs.vlan = match_hvs.vlan then [] else [SetVlan (Some act_hvs.vlan) |> Modify] in
-    let vlanPcpAct = if minimize && act_hvs.vlanPcp = match_hvs.vlanPcp then [] else [SetVlanPcp act_hvs.vlanPcp |> Modify] in
-    let ethTypeAct = if minimize && act_hvs.ethType = match_hvs.ethType then [] else [SetEthTyp act_hvs.ethType |> Modify] in
-    let ipProtoAct = if minimize && act_hvs.ipProto = match_hvs.ipProto then [] else [SetIPProto act_hvs.ipProto |> Modify] in
-    let ipSrcAct = if minimize && act_hvs.ipSrc = match_hvs.ipSrc then [] else [SetIP4Src act_hvs.ipSrc |> Modify ] in
-    let ipDstAct = if minimize && act_hvs.ipDst = match_hvs.ipDst then [] else [SetIP4Dst act_hvs.ipDst |> Modify ] in
-    let tcpSrcAct = if minimize && act_hvs.tcpSrcPort = match_hvs.tcpSrcPort then [] else [SetTCPSrcPort act_hvs.tcpSrcPort |> Modify] in
-    let tcpDstAct = if minimize && act_hvs.tcpDstPort = match_hvs.tcpDstPort then [] else [SetTCPDstPort act_hvs.tcpDstPort |> Modify] in
-    let outPort = [Physical next_hop |> Output] in
-
-    
-    let act = List.concat [ethSrcAct; ethDstAct; vlanAct; vlanPcpAct; ethTypeAct;
-                           ipProtoAct; ipSrcAct; ipDstAct; tcpSrcAct; tcpDstAct;
-                           outPort] in
-    
-    { pattern      = match_pat;
-      action       = [[act]];
-      cookie       = 0L;
-      idle_timeout = Permanent;
-      hard_timeout = Permanent  }
-
-
-  (*
-   * Input is going to be 
-   *  -- a policy (as netkat programs)
-   *  -- the topology (as a netkat program) 
-   *  -- the input packet 
-   * Output needs to be
-   *  -- the ingress switchID
-   *  -- the OpenFlow rules to create special purpose packet
-   *  -- the identifier of the end switch
-   *  -- the OpenFlow rules to reinstate the special packet on the end switch
-   *)
-  let packet_tfx (policy:Syntax.policy) (pkt:packet) : ((switchId * OpenFlow.flow) * (switchId * OpenFlow.flow)) option =
-    let open Option in
-    let fdd_trace = fdd_trace_interp policy pkt in
-    match fdd_trace with
-    | [] -> failwith "NONE>>>>>" (*None Packet is dropped*)
-    | (out_pkt, trace)::[] ->
-
-       (match trace with 
-        | [] -> None
-        | first_hop :: loc_trace' ->
-           let pt_trace' = List.map loc_trace' ~f:(fun l -> Syntax.getPhys l |> Int64.of_int32) in
-           let src_route_packet = cannibalize_packet out_pkt pt_trace' in
-           let traversed_packet = {src_route_packet
-                                  with headers = {src_route_packet.headers
-                                                 with ethDst = 0L}} in
-
-           let first_hop_port = Syntax.getPhys first_hop in
-           let ingress_tfx = flow_from_packet ~flow:pkt
-                               ~action:src_route_packet
-                               ~outport:first_hop_port
-                               ~match_inport:true ~minimize:true
-                               in
-           
-           (*Bind is in Option*)
-           let egress_port = getPhys out_pkt.headers.location in
-           let egress_tfx = flow_from_packet
-                              ~flow:traversed_packet
-                              ~action:out_pkt
-                              ~outport:egress_port
-                              ~match_inport:false
-                              ~minimize:true in
-           
-           Some ((pkt.switch, ingress_tfx ),
-                 (out_pkt.switch, egress_tfx))
-       )
-    | _::_ -> failwith "multicast is unsupported (for now)"
-                       
+        if prec = None || tr = [] || mds = [] || contradictory prec then None else
+          Some (prec ,
+                trace_for_path p,
+                mods_for_path p))
+              
       
 
 end

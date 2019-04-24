@@ -1,0 +1,37 @@
+{
+    "switches" : [
+	{
+	    "swId" : 0,
+	    "entries" : [
+		{ "match"  : [{"ethdst" : 0}],
+		  "action" : [{"port" : 10}]
+		},
+		{ "match" : [{"ethdst" : 100}],
+		  "action" : [{"port" : 5}]
+		}
+	    ]
+	},
+	{
+	    "swId" : 50,
+	    "entries" : [
+		{ "match"  : [{"ethdst" : 0}],
+		  "action" : [{"port" : 15}]
+		},
+		{ "match"  : [{"ethdst" : 100}],
+		  "action" : [{"port" : 5}]
+		}
+	    ]
+	},
+	{
+	    "swId" : 100,
+	    "entries" : [
+		{ "match"  : [{"ethdst" : 0}],
+		  "action" : [{"port" : 15 }]
+		},
+		{ "match"  : [{"ethdst" : 100}],
+		  "action" : [{"port" : 10 }]
+		}
+	    ]
+	}
+    ]
+}

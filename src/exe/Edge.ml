@@ -59,7 +59,7 @@ module Edge = struct
     let pol = parse_tables tablesfile in
     let program = Netkat.Syntax.(
         Seq(Seq(Seq(edge,pol),
-                Star(Seq(pol, topo))
+                Star(Seq(topo, pol))
               ),
             edge)) in
     Printf.printf "%s\n\n" (Netkat.Pretty.string_of_policy program);
