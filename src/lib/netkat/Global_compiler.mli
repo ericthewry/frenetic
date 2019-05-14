@@ -25,17 +25,23 @@ module Automaton : sig
   (** Compiles the provided automaton `t` using `graphviz`, and opens the resulting
       file. *)
 
-  open Semantics                                                         
-  val fdd_trace_interp : policy -> packet -> (packet * (Syntax.location list)) list
-  (* val cannibalize_packet : packet -> int64 list -> packet *)
-  (* val flow_from_packet : flow:packet -> action:packet -> outport:OpenFlow.portId ->
-   *                        match_inport:bool -> minimize:bool  -> OpenFlow.flow *)
-  (* val packet_tfx : policy -> packet -> ((switchId * OpenFlow.flow) * (switchId * OpenFlow.flow)) option *)
+  (* open Semantics                                                         
+   * val fdd_trace_interp : policy -> packet -> (packet * (Syntax.location list)) list
+   * (\* val cannibalize_packet : packet -> int64 list -> packet *\)
+   * (\* val flow_from_packet : flow:packet -> action:packet -> outport:OpenFlow.portId ->
+   *  *                        match_inport:bool -> minimize:bool  -> OpenFlow.flow *\)
+   * (\* val packet_tfx : policy -> packet -> ((switchId * OpenFlow.flow) * (switchId * OpenFlow.flow)) option *\) *)
 
-  val get_all_paths : policy -> ((((bool * (Fdd.Field.t * Fdd.Value.t)) list) option)
+  val get_all_paths : ?render_auto:bool ->
+                      policy -> ((((bool * (Fdd.Field.t * Fdd.Value.t)) list) option)
                                  * (int64 list)
                                  * (Fdd.Field.t * Fdd.Value.t) list
                                 ) list
+
+  val path_match : ?render_auto:bool -> policy -> policy ->
+                   ((bool * (Fdd.Field.t * Fdd.Value.t)) list * (Fdd.Field.t * Fdd.Value.t) list *
+                      (bool * (Fdd.Field.t * Fdd.Value.t)) list * (Fdd.Field.t * Fdd.Value.t) list)
+                     list
                          
   val skip_topo_states : t
     -> ((int64, (int64 * int64)) Hashtbl.t * ((int64 * int64), Int64.Set.t) Hashtbl.t)

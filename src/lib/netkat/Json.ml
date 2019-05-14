@@ -294,64 +294,71 @@ let string_of_field f =
   | TCPSrcPort -> "tcpsrcport"
   | TCPDstPort -> "tcpdstport"
   | _ -> failwith "unsupported field"
-    
+
+
+let json_of_val v : json option = match v with
+  | Fdd.Value.Const i -> Some( `Int (Int.of_int64_exn i))
+  | _ -> None
+
+
+let prec_json cond_list =
+  let open Option in
+  List.filter_map cond_list ~f:(fun (b, hv) -> if b then Some hv else None)
+  |> List.filter_map
+       ~f:(fun (h, v) ->
+         json_of_val v >>=
+           fun jval ->
+           Some (string_of_field h, jval) )
+                     
+let mods_json mod_list : json list =
+  let open Option in
+  List.filter_map mod_list
+    ~f:(fun (f, v) ->
+      json_of_val v >>= fun jval ->
+      `Assoc [(string_of_field f, jval)] |> Some
+    )
+
+       
+                  
 let path_to_json ((precond, port_list, mod_list) :
                     ((bool * (Fdd.Field.t * Fdd.Value.t)) list option )
                     * int64 list
                     * (Fdd.Field.t * Fdd.Value.t) list ) : json option =
   let open Option in
   precond >>= fun cond_list ->
-     let json_of_val v : json option = match v with
-       | Fdd.Value.Const i -> Some( `Int (Int.of_int64_exn i))
-       | _ -> None
-     in
-     (* let () = Printf.printf "[";
-      *          List.iter cond_list ~f:(fun (b, (f, vl)) ->
-      *              let v = match vl with | Const v -> v
-      *                                    | Mask (v,bits) -> if bits = 32 or bits = 64
-      *                                                       then v
-      *                                                       else failwith "Non-exact match not supp'd"
-      *                                    | AbstractLocation _ -> failwith "Abstract Loc Not Handled"
-      *                                    | Pipe _ -> failwith "Pipe not handled"
-      *                                    | Query _ -> failwith "Query Not Handled"
-      *                                    | FastFail _ -> failwith "FastFail not handled"
-      *              in
-      *              Printf.printf "%B (%s, %d)," b (string_of_field f) (Int.of_int64_exn v));
-      *          Printf.printf "]\n" *)
-     (* in *)
+
      let switch = List.fold cond_list ~init:None ~f:(fun res (b, (f,v)) ->
                       match b, f with
                       | true, Fdd.Field.Switch -> Some v
                       | _, _ -> res)
                   >>= json_of_val
      in
-     let prec_json =
-       List.filter_map cond_list ~f:(fun (b, hv) -> if b then Some hv else None)
-       |> List.filter_map ~f:(fun (h, v) ->
-              json_of_val v >>= fun jval ->
-              Some (string_of_field h, jval) )
-      in
-      let ports_json =
-        List.map port_list ~f:(fun p -> `Int (Int.of_int64_exn p))
-      in
-      let mods_json : json list =
-        List.filter_map mod_list
-          ~f:(fun (f, v) ->
-            json_of_val v >>= fun jval ->
-            `Assoc [(string_of_field f, jval)] |> Some
-          )
-      in
-      switch >>= fun sw ->
-      `Assoc [("switch", sw);
-              ("precondition", `Assoc prec_json);
-              ("ports", `List ports_json);
-              ("final_packet", `List mods_json)]
-      |> Some
+
+     let ports_json =
+       List.map port_list ~f:(fun p -> `Int (Int.of_int64_exn p))
+     in
      
-  
+     switch >>= fun sw ->
+     `Assoc [("switch", sw);
+             ("precondition", `Assoc (prec_json cond_list));
+             ("ports", `List ports_json);
+             ("final_packet", `List (mods_json mod_list))]
+     |> Some
+          
+          
 let paths_to_json_string paths : string =
   let json_list = List.filter_map paths ~f:path_to_json in
   pretty_to_string (`Assoc [("rules", `List json_list)])
+
+let match_to_json (prec, act, prec', act') : json =
+  `Assoc [("inprec", `Assoc (prec_json prec));
+          ("inact", `List (mods_json act));
+          ("outprec", `Assoc (prec_json prec'));
+          ("outact", `List (mods_json act'))]
+
+let matches_to_json_string matches : string =
+  let json_list = List.map matches ~f:match_to_json in
+  pretty_to_string (`Assoc [("matches", `List json_list)])
   
 
     

@@ -34,6 +34,13 @@ val paths_to_json_string : (((bool * (Fdd.Field.t * Fdd.Value.t)) list option )
                            ) list
                            -> string
 
+(** Serialize Hybrid matches into Json String **)
+val matches_to_json_string : (  (bool * (Fdd.Field.t * Fdd.Value.t)) list
+                              * (Fdd.Field.t * Fdd.Value.t) list
+                              * (bool * (Fdd.Field.t * Fdd.Value.t)) list
+                              * (Fdd.Field.t * Fdd.Value.t) list
+                             ) list -> string
+
 
 val from_json_header_val : json -> header_val
 

@@ -666,43 +666,6 @@ module Automaton = struct
   let render ?(format="pdf") ?(title="FDD") t =
     Frenetic_kernel.Util.show_dot ~format ~title (to_dot t)
 
-  let fdd_trace_interp policy packet : (packet * (Syntax.location list)) list =
-    (* Compute an automaton for the input policy *)
-    let auto = of_policy ~dedup:true ~cheap_minimize:true policy in
-    let rec interp is_phys (pkt, seen) (id : int64) : (packet * (Syntax.location list)) list =
-      (* Printf.printf "\nSTATE: %s " (Int64.to_string id);
-       * Printf.printf "Packet: Vlan %s EthSrc %s EthDst %s IPDst %s Port %s Switch %s\n" (Int.to_string pkt.headers.vlan) (Int64.to_string pkt.headers.ethSrc) (Int64.to_string pkt.headers.ethDst) (Int32.to_string pkt.headers.ipDst) (Int32.to_string ((fun (Physical port) -> port) pkt.headers.location)) (Int64.to_string pkt.switch); *)
-
-      let seen' = S.add seen id in
-      let (e,d) as state = Tbl.find_exn auto.states id in
-      (* Printf.printf "E: %s\n" (FDD.to_string e); *)
-      let epkts = Interp.eval pkt e in
-      let dpkts =
-        (* Printf.printf "D: %s\n" (FDD.to_string d); *)
-        let restr_d = FDD.restrict (List.map(to_hvs pkt) ~f:Pattern.of_hv) d in
-        PacketSet.fold (Interp.eval pkt restr_d) ~init:[] ~f:(fun acc dpkt ->
-            let next_hops = FDD.conts restr_d in
-            (* If there are no next hops then we're at the end of the trace *)
-            if Int64.Set.is_empty next_hops then
-              (* let () = Printf.printf "NO HOPS" in *)
-              [(dpkt, [])]
-            else
-              Int64.Set.fold next_hops ~init:[] ~f:(fun acc next_hop ->
-                  (* Printf.printf "K: %s\n" (Int64.to_string next_hop); *)
-                  List.fold (interp (not is_phys) (dpkt, seen') next_hop) ~init:[]
-                    ~f:(fun acc (final_packet, trace) ->
-                      (* Printf.printf "TRACE : ";
-                       * List.iter trace ~f:(fun (Physical p) -> Printf.printf " %s" (Int32.to_string p));
-                       * Printf.printf "\n"; *)
-                      let trace' = if is_phys then trace else dpkt.headers.location :: trace in
-                      (final_packet, trace') :: acc
-                    ) |> List.append acc
-                ) |> List.append acc
-          ) in
-      PacketSet.fold epkts ~init:dpkts ~f:(fun acc epkt -> (epkt, []) :: acc)
-    in
-    interp false (packet, S.empty) auto.source
-
   type elt =
     | TrTest of bool * FDD.v
     | TrMod of FDD.v
@@ -740,7 +703,6 @@ module Automaton = struct
         then acc >>= optcons (b, (h,v))
         else (*header is the same*)
           if b = (v = valu) then
-            (* let () = Printf.printf "%s = %s elim\n" (Field.to_string h) (Value.to_string v) in *)
             acc (*Eliminate tautological conditions*)
           else None (*Trace is a contradiction *)
       )
@@ -796,23 +758,33 @@ module Automaton = struct
            else if b && not b' || not b && b' then v = v'
            else false
          ) || contradictory (Some pred')
-                  
-  let get_all_paths pol : ((((bool * (Field.t * Value.t)) list) option)
+
+  let rec expand_one_path (path : (FDD.t * bool) list) : elt list =
+    List.fold path ~init:[] ~f:(fun acc (fdd, b) ->
+        match FDD.unget fdd with
+        | Leaf a ->
+           mk_trmods a
+           @ acc
+        | Branch {test=t; tru=_;fls=_;all_fls=_} ->
+           TrTest (b,t) :: acc
+      )
+      
+  let rec dedup (prec: (bool * (Field.t * Value.t)) list option) : (bool * (Field.t * Value.t)) list option =
+    let open Option in
+    prec >>= fun prec' -> 
+        List.remove_consecutive_duplicates prec' ~which_to_keep:`First ~equal:(=) |> Some
+
+                            
+  let get_all_paths ?(render_auto = false) pol : ((((bool * (Field.t * Value.t)) list) option)
                            * (int64 list)
                            * (Field.t * Value.t) list) list =
     let open Option in
     
     (* Get Automaton *)
     let auto = of_policy ~dedup:true ~cheap_minimize:true pol in
-    render auto;
+    if render_auto then render auto;
 
-    let rec repeat str n =
-      if n = 0 then ""
-      else str ^ repeat str (n-1)
-    in
-
-    let rec collect_all_paths' count (f:FDD.t) (path:(FDD.t * bool) list) : (FDD.t * bool) list list =
-      Printf.printf "%s%s\n" (repeat "   " count) (FDD.to_string f);
+    let rec collect_all_paths count (f:FDD.t) (path:(FDD.t * bool) list) : (FDD.t * bool) list list =
       if List.mem ~equal:(fun (f,_) (f',_) -> f = f') path (f,true) then [] else
         let path' b = (f,b)::path in
         let successors = (FDD.conts f) in
@@ -826,65 +798,68 @@ module Automaton = struct
              (* fold over the successor states *)
              Set.fold successors ~init:[] ~f:(fun paths next_state ->
                  (*Get the two possible next FDDs*)
-                 Printf.printf "%s=====STATE %s=====\n" (repeat "   " count) (Int64.to_string next_state);
                  let (e,d) = Tbl.find_exn auto.states next_state in
                  (*get the paths for each fdd  *)
-                 collect_all_paths' (count+1) e (path' true)
-                 @ collect_all_paths' (count+1) d (path' true)
+                 collect_all_paths (count+1) e (path' true)
+                 @ collect_all_paths (count+1) d (path' true)
                )
 
         | FDD.Branch {test=t; tru=tfdd; fls=ffdd; all_fls=_} ->
            (*Get the paths for each fdd*)
-           collect_all_paths' (count + 1) tfdd (path' true)
-           @ collect_all_paths' (count+1) ffdd (path' false)
+           collect_all_paths (count + 1) tfdd (path' true)
+           @ collect_all_paths (count+1) ffdd (path' false)
     in
 
-    let rec expand_one_path (path : (FDD.t * bool) list) : elt list =
-      List.fold path ~init:[] ~f:(fun acc (fdd, b) ->
-          match FDD.unget fdd with
-          | Leaf a ->
-             mk_trmods a
-             @ acc
-          | Branch {test=t; tru=_;fls=_;all_fls=_} ->
-             TrTest (b,t) :: acc
-        )
-    in
-
-    let rec dedup (prec: (bool * (Field.t * Value.t)) list option) : (bool * (Field.t * Value.t)) list option =
-      prec >>= fun prec' -> 
-        List.remove_consecutive_duplicates prec' ~which_to_keep:`First ~equal:(=) |> Some
-    in
-
-    Printf.printf "COLLECTING PATHS\n";
     let (e,d) = Tbl.find_exn auto.states auto.source in
-    let ps = collect_all_paths' 0 e []
-             @ collect_all_paths' 0 d []
+    let ps = collect_all_paths 0 e []
+             @ collect_all_paths 0 d []
     in 
-    let () = Printf.printf "--COLLECTED\n\nEXPANDING\n" in
     let eps = List.map ~f:expand_one_path ps in
-    let () = Printf.printf "--EXPANDED\n" in
     List.filter_map eps ~f:(fun p ->
-        let () = Printf.printf "Path [";
-                 List.iter p (fun e -> Printf.printf " %s," (string_of_elt e));
-                 Printf.printf "]\n"
-        in
         let prec = predicate_for_path p |> dedup in
-        let () = Printf.printf "Pred [";
-                 match prec with
-                 | None -> Printf.printf "None\n";
-                 | Some prec ->
-                    List.iter prec (fun (b,(h,v)) ->
-                     Printf.printf "(%B, (%s,%s))" b (Field.to_string h) (Value.to_string v));
-                    Printf.printf "]\n" in
         let tr = trace_for_path p in
         let mds = mods_for_path p in
         if prec = None || tr = [] || mds = [] || contradictory prec then None else
           Some (prec ,
                 trace_for_path p,
                 mods_for_path p))
-              
-      
 
+
+
+  let make_assignment prec prec_acts acts_prec acts : (bool * (Field.t * Value.t)) list * (Field.t * Value.t) list *
+                                                       (bool * (Field.t * Value.t)) list * (Field.t * Value.t) list =
+    (prec, List.filter_map prec_acts ~f:(fun (b, fv) -> if b then Some fv else None ),
+     List.map acts_prec ~f:(fun fv -> (true, fv)), acts)
+     
+
+  let similar p p' : bool = p = p
+
+  let path_match ?(render_auto = false) (network:policy) (intent:policy) :
+        ((bool * (Field.t * Value.t)) list * (Field.t * Value.t) list *
+           (bool * (Field.t * Value.t)) list * (Field.t * Value.t) list)
+          list =
+    let open Option in
+    let net_paths = get_all_paths network ~render_auto in
+    let intent_paths = get_all_paths intent ~render_auto in
+    List.fold intent_paths ~init:[] ~f:(fun tfxpaths (iprec, ipath, iacts) ->
+        match iprec with
+        | None -> tfxpaths
+        | Some iprec -> 
+           let path = List.fold net_paths ~init:None ~f:(fun found (nprec, npath, nacts) ->                          
+                          match nprec, found with
+                          | None, _ -> found
+                          | _, Some x -> Some x
+                          | Some nprec, None ->  if similar npath ipath
+                                                 then make_assignment iprec nprec iacts nacts |> Some
+                                                 else None
+                        ) in
+        match path with
+        | None  -> tfxpaths
+        | Some p -> p :: tfxpaths
+      )
+              
+              
+    
 end
 (* END: module Automaton *)                
     
