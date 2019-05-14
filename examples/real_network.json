@@ -3,10 +3,10 @@
 	{
 	    "swId" : 0,
 	    "entries" : [
-		{ "match"  : [{"ethdst" : 0}],
+		{ "match"  : [{"ethsrc" : 0}],
 		  "action" : [{"port" : 10}]
 		},
-		{ "match" : [{"ethdst" : 100}],
+		{ "match" : [{"ethsrc" : 100}],
 		  "action" : [{"port" : 5}]
 		}
 	    ]
@@ -14,21 +14,21 @@
 	{
 	    "swId" : 50,
 	    "entries" : [
-		{ "match"  : [{"ethdst" : 0}],
+		{ "match"  : [{"ethsrc" : 0}],
 		  "action" : [{"port" : 15}]
 		},
-		{ "match"  : [{"ethdst" : 100}],
-		  "action" : [{"port" : 5}, {"ethdst" : 200}]
+		{ "match"  : [{"ethsrc" : 100}],
+		  "action" : [{"port" : 5}, {"ethsrc" : 200}]
 		}
 	    ]
 	},
 	{
 	    "swId" : 100,
 	    "entries" : [
-		{ "match"  : [{"ethdst" : 0}],
+		{ "match"  : [{"ethsrc" : 0}],
 		  "action" : [{"port" : 15 }]
 		},
-		{ "match"  : [{"ethdst" : 200}],
+		{ "match"  : [{"ethsrc" : 200}],
 		  "action" : [{"port" : 10 }]
 		}
 	    ]
