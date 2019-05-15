@@ -794,7 +794,7 @@ module Automaton = struct
              (* fold over the successor states *)
              Set.fold successors ~init:[] ~f:(fun paths next_state ->
                  (*Get the two possible next FDDs*)
-                 let (e,d) = Tbl.find_exn auto.states next_state in
+                 let (e,d) = Hashtbl.find_exn auto.states next_state in
                  (*get the paths for each fdd  *)
                  collect_all_paths (count+1) e (path' true)
                  @ collect_all_paths (count+1) d (path' true)
@@ -806,7 +806,7 @@ module Automaton = struct
            @ collect_all_paths (count+1) ffdd (path' false)
     in
 
-    let (e,d) = Tbl.find_exn auto.states auto.source in
+    let (e,d) = Hashtbl.find_exn auto.states auto.source in
     let ps = collect_all_paths 0 e []
              @ collect_all_paths 0 d []
     in 
