@@ -828,7 +828,7 @@ module Automaton = struct
      List.map acts_prec ~f:(fun fv -> (true, fv)), acts)
      
 
-  let similar p p' : bool = p = p
+  let similar p p' : bool = p = p'
 
   let path_match ?(render_auto = false) (network:policy) (intent:policy) :
         ((bool * (Field.t * Value.t)) list * (Field.t * Value.t) list *
